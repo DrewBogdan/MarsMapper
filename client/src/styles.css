@@ -33,6 +33,89 @@ body {
   pointer-events: none;
 }
 
+.location-form,
+.location-info {
+  position: fixed;
+  left: 12px;
+  display: flex;
+  gap: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.24);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+  color: #222;
+  font: 12px/1.3 sans-serif;
+}
+
+.location-form {
+  top: 12px;
+  align-items: end;
+  padding: 8px;
+}
+
+.location-form label {
+  display: grid;
+  gap: 3px;
+  font-weight: 600;
+}
+
+.location-form input {
+  width: 88px;
+  height: 28px;
+  border: 1px solid #aaa;
+  border-radius: 2px;
+  padding: 4px 6px;
+  color: inherit;
+  font: inherit;
+}
+
+.location-form button {
+  height: 28px;
+  border: 1px solid #555;
+  border-radius: 2px;
+  background: #252525;
+  color: #fff;
+  font: 600 12px/1 sans-serif;
+  cursor: pointer;
+}
+
+.location-error {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  width: max-content;
+  max-width: min(360px, calc(100vw - 24px));
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 3px;
+  background: #9d1c1c;
+  color: #fff;
+}
+
+.location-info {
+  bottom: 12px;
+  flex-direction: column;
+  max-width: min(320px, calc(100vw - 24px));
+  padding: 9px 10px;
+}
+
+.location-info span {
+  color: #555;
+}
+
+.location-marker {
+  position: absolute;
+  z-index: 1;
+  width: 18px;
+  height: 18px;
+  margin: -9px;
+  border: 3px solid #fff;
+  border-radius: 50%;
+  background: #d73a29;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.7);
+  pointer-events: none;
+}
+
 .zoom-controls {
   position: fixed;
   top: 12px;
