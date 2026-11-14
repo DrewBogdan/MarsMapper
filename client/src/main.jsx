@@ -7,6 +7,12 @@ const TILE_URL =
 const MIN_ZOOM = 2;
 const MAX_ZOOM = 7;
 const LOCATION_ZOOM = 5;
+const ELEVATION_BOUNDS = {
+  minLatitude: 17.70703125,
+  maxLatitude: 18.95703125,
+  minLongitude: 226.11328125,
+  maxLongitude: 227.48828125,
+};
 
 function worldSize(zoom) {
   // NASA EPSG:104905 level 0 is two columns by one row, not a square XYZ world.
@@ -22,6 +28,20 @@ function constrain(view, element) {
   };
 }
 
+function parseElevationSamples(csv) {
+  return csv.trim().split('\n').slice(1).map((line) => {
+    const [, latitude, longitude, elevation] = line.split(',');
+    return { latitude: Number(latitude), longitude: Number(longitude), elevation: Number(elevation) };
+  });
+}
+
+function findNearestSample(samples, latitude, longitude) {
+  return samples.reduce((nearest, sample) => {
+    const distance = (sample.latitude - latitude) ** 2 + (sample.longitude - longitude) ** 2;
+    return !nearest || distance < nearest.distance ? { sample, distance } : nearest;
+  }, null)?.sample;
+}
+
 function MarsMap() {
   const mapRef = useRef(null);
   const dragRef = useRef(null);
@@ -31,6 +51,8 @@ function MarsMap() {
   const [latitude, setLatitude] = useState('');
   const [locationError, setLocationError] = useState('');
   const [selectedLocation, setSelectedLocation] = useState(null);
+  const [elevationSamples, setElevationSamples] = useState([]);
+  const [elevationError, setElevationError] = useState('');
 
   useEffect(() => {
     const element = mapRef.current;
@@ -43,6 +65,16 @@ function MarsMap() {
     const observer = new ResizeObserver(() => setView((current) => constrain(current, element)));
     observer.observe(element);
     return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    fetch('/mars-polygon.csv')
+      .then((response) => {
+        if (!response.ok) throw new Error(`Request failed with status ${response.status}`);
+        return response.text();
+      })
+      .then((csv) => setElevationSamples(parseElevationSamples(csv)))
+      .catch((error) => setElevationError(error.message));
   }, []);
 
   const zoomAtCenter = (nextZoom) => {
@@ -59,18 +91,42 @@ function MarsMap() {
   };
 
   const startDrag = (event) => {
-    dragRef.current = { x: event.clientX, y: event.clientY, view };
+    dragRef.current = { x: event.clientX, y: event.clientY, view, moved: false };
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
   const drag = (event) => {
     if (!dragRef.current) return;
     const { x, y, view: startView } = dragRef.current;
+    if (Math.hypot(event.clientX - x, event.clientY - y) > 4) dragRef.current.moved = true;
     setView(constrain({
       ...startView,
       x: startView.x + event.clientX - x,
       y: startView.y + event.clientY - y,
     }, mapRef.current));
+  };
+
+  const selectMapLocation = (event) => {
+    const element = mapRef.current;
+    const bounds = element.getBoundingClientRect();
+    const { width, height } = worldSize(view.zoom);
+    const pointX = event.clientX - bounds.left - view.x;
+    const pointY = event.clientY - bounds.top - view.y;
+    const matrixLongitude = (pointX / width) * 360 - 180;
+    const lng = matrixLongitude < 0 ? matrixLongitude + 360 : matrixLongitude;
+    const lat = 90 - (pointY / height) * 180;
+
+    if (lat < -90 || lat > 90 || lng < 0 || lng > 360) return;
+    setLocationError('');
+    setLongitude(lng.toFixed(6));
+    setLatitude(lat.toFixed(6));
+    setSelectedLocation({ lng, lat, matrixLongitude });
+  };
+
+  const endDrag = (event) => {
+    const dragState = dragRef.current;
+    dragRef.current = null;
+    if (dragState && !dragState.moved) selectMapLocation(event);
   };
 
   const selectLocation = (event) => {
@@ -128,13 +184,22 @@ function MarsMap() {
     marker = <span aria-label="Selected location" className="location-marker" style={{ transform: `translate(${markerX}px, ${markerY}px)` }} />;
   }
 
+  const hasElevationCoverage = selectedLocation
+    && selectedLocation.lat >= ELEVATION_BOUNDS.minLatitude
+    && selectedLocation.lat <= ELEVATION_BOUNDS.maxLatitude
+    && selectedLocation.lng >= ELEVATION_BOUNDS.minLongitude
+    && selectedLocation.lng <= ELEVATION_BOUNDS.maxLongitude;
+  const elevationSample = hasElevationCoverage && elevationSamples.length
+    ? findNearestSample(elevationSamples, selectedLocation.lat, selectedLocation.lng)
+    : null;
+
   return (
     <main
       aria-label="Interactive map of Mars"
       id="mars-map"
       onPointerDown={startDrag}
       onPointerMove={drag}
-      onPointerUp={() => { dragRef.current = null; }}
+      onPointerUp={endDrag}
       ref={mapRef}
       tabIndex="0"
     >
@@ -161,7 +226,10 @@ function MarsMap() {
           <strong>
             Areocentric: {Math.abs(selectedLocation.lat).toFixed(5)}{selectedLocation.lat < 0 ? 'S' : 'N'}, {selectedLocation.lng.toFixed(5)}E
           </strong>
-          <span>No local data is available for this location yet.</span>
+          {elevationError && <span>Elevation data failed to load: {elevationError}</span>}
+          {!elevationError && !elevationSamples.length && <span>Loading elevation data...</span>}
+          {!elevationError && elevationSamples.length && !elevationSample && <span>No elevation sample is available at this location.</span>}
+          {elevationSample && <span>MOLA 128ppd elevation: {elevationSample.elevation.toLocaleString()} m</span>}
         </section>
       )}
       {tileError && <p id="tile-error" role="alert">{tileError}</p>}
