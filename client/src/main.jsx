@@ -29,6 +29,8 @@ const MIN_ZOOM = 2;
 const MAX_ZOOM = 9;
 const INSPECTION_ZOOM = 5;
 const MARS_RADIUS_KM = 3390;
+const GEO_FEATURES_URL = 'https://geocode.openspaceproject.com/1/list/mars';
+const GEO_FEATURES_CACHE_KEY = 'mars-geological-features-v1';
 const FOCUS_BOUNDS = {
   minLatitude: 0,
   maxLatitude: 40,
@@ -73,6 +75,24 @@ function parseHydrousSites(csv) {
       longitude: normalizeMatrixLongitude(longitude),
       omegaProductId: explicitOmega || fallbackOmega,
       crismProductId: explicitCrism || fallbackCrism,
+    }];
+  });
+}
+
+function parseGeologicalFeatures(payload) {
+  if (!Array.isArray(payload?.result)) throw new Error('OpenSpace returned an invalid feature list.');
+  return payload.result.flatMap((feature, index) => {
+    const latitude = Number(feature.CenterLatitude);
+    const longitude = Number(feature.CenterLongitude);
+    const name = typeof feature.FeatureName === 'string' ? feature.FeatureName.trim() : '';
+    const type = typeof feature.FeatureType === 'string' ? feature.FeatureType.trim() : '';
+    if (!name || !type || !Number.isFinite(latitude) || !Number.isFinite(longitude) || latitude < -90 || latitude > 90 || Math.abs(longitude) > 360) return [];
+    return [{
+      id: `geological-${index}-${name}`,
+      name,
+      type,
+      latitude,
+      longitude: normalizeMatrixLongitude(longitude),
     }];
   });
 }
@@ -148,6 +168,7 @@ function MarsMap() {
   const mapRef = useRef(null);
   const dragRef = useRef(null);
   const hydrousExploreRef = useRef(false);
+  const panelResizeRef = useRef(null);
   const [view, setView] = useState({ zoom: MIN_ZOOM, x: 0, y: 0 });
   const [minimumZoom, setMinimumZoom] = useState(MIN_ZOOM);
   const [layer, setLayer] = useState('color');
@@ -166,6 +187,10 @@ function MarsMap() {
   const [hydrousSites, setHydrousSites] = useState({ status: 'loading', value: [] });
   const [hydrousError, setHydrousError] = useState('');
   const [highlightedHydrousSite, setHighlightedHydrousSite] = useState(null);
+  const [geologicalFeatures, setGeologicalFeatures] = useState({ status: 'loading', value: [] });
+  const [geologicalError, setGeologicalError] = useState('');
+  const [highlightedGeologicalFeature, setHighlightedGeologicalFeature] = useState(null);
+  const [nearbyFilter, setNearbyFilter] = useState('all');
   const [hydrousExploreMode, setHydrousExploreMode] = useState(false);
 
   useEffect(() => {
@@ -185,6 +210,39 @@ function MarsMap() {
     const observer = new ResizeObserver(() => setView((current) => constrain(current, element, hydrousExploreRef.current)));
     observer.observe(element);
     return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const loadFeatures = async () => {
+      try {
+        const cached = localStorage.getItem(GEO_FEATURES_CACHE_KEY);
+        if (cached) {
+          const features = parseGeologicalFeatures(JSON.parse(cached));
+          setGeologicalFeatures({ status: 'ready', value: features });
+          return;
+        }
+
+        const response = await fetch(GEO_FEATURES_URL, { signal: controller.signal });
+        if (!response.ok) throw new Error(`OpenSpace request failed with status ${response.status}`);
+        const payload = await response.json();
+        const features = parseGeologicalFeatures(payload);
+        if (features.length === 0) throw new Error('OpenSpace returned no valid Mars features.');
+        try {
+          localStorage.setItem(GEO_FEATURES_CACHE_KEY, JSON.stringify(payload));
+        } catch {
+          // Continue with in-memory results when browser storage is unavailable.
+        }
+        setGeologicalFeatures({ status: 'ready', value: features });
+      } catch (error) {
+        if (error.name !== 'AbortError') {
+          setGeologicalFeatures({ status: 'error', value: [] });
+          setGeologicalError(error.message);
+        }
+      }
+    };
+    loadFeatures();
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {
@@ -279,6 +337,7 @@ function MarsMap() {
     hydrousExploreRef.current = false;
     setHydrousExploreMode(false);
     setHighlightedHydrousSite(null);
+    setHighlightedGeologicalFeature(null);
     if (!measurementStart || measurementEnd) {
       setMeasurementStart(location);
       setMeasurementEnd(null);
@@ -299,6 +358,7 @@ function MarsMap() {
     setLongitude('');
     setLatitude('');
     setHighlightedHydrousSite(null);
+    setHighlightedGeologicalFeature(null);
     hydrousExploreRef.current = false;
     setHydrousExploreMode(false);
   };
@@ -324,6 +384,36 @@ function MarsMap() {
     const dragState = dragRef.current;
     dragRef.current = null;
     if (dragState && !dragState.moved) selectMapLocation(event);
+  };
+
+  const startTopPanelResize = (event) => {
+    const panel = event.currentTarget.parentElement;
+    const bounds = panel.getBoundingClientRect();
+    panelResizeRef.current = {
+      height: bounds.height,
+      width: bounds.width,
+      x: event.clientX,
+      y: event.clientY,
+      panel,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  const resizeTopPanel = (event) => {
+    const resize = panelResizeRef.current;
+    if (!resize) return;
+    const width = Math.min(window.innerWidth - 36, Math.max(280, resize.width + event.clientX - resize.x));
+    const height = Math.min(window.innerHeight - 36, Math.max(220, resize.height - (event.clientY - resize.y)));
+    resize.panel.style.width = `${width}px`;
+    resize.panel.style.height = `${height}px`;
+    event.stopPropagation();
+  };
+
+  const endTopPanelResize = (event) => {
+    panelResizeRef.current = null;
+    event.stopPropagation();
   };
 
   const selectLocation = (event) => {
@@ -352,7 +442,7 @@ function MarsMap() {
     }, element));
   };
 
-  const centerOnHydrousSite = (site) => {
+  const centerOnReference = (site, category) => {
     const element = mapRef.current;
     const zoom = view.zoom;
     const { width, height } = worldSize(zoom);
@@ -360,7 +450,8 @@ function MarsMap() {
     const pointY = ((90 - site.latitude) / 180) * height;
     setHydrousExploreMode(true);
     hydrousExploreRef.current = true;
-    setHighlightedHydrousSite(site.id);
+    setHighlightedHydrousSite(category === 'hydrous' ? site.id : null);
+    setHighlightedGeologicalFeature(category === 'geological' ? site.id : null);
     setView(constrain({
       zoom,
       x: element.clientWidth / 2 - pointX,
@@ -420,7 +511,22 @@ function MarsMap() {
       .slice(0, 5)
     : [];
 
-  for (const site of nearbyHydrousSites) {
+  const nearbyGeologicalFeatures = selectedLocation && !measurementEnd && geologicalFeatures.status === 'ready'
+    ? geologicalFeatures.value
+      .map((feature) => ({
+        ...feature,
+        distanceKm: surfaceDistanceKm(
+          { latitude: selectedLocation.lat, longitude: selectedLocation.matrixLongitude },
+          feature,
+        ),
+      }))
+      .sort((first, second) => first.distanceKm - second.distanceKm)
+      .slice(0, 5)
+    : [];
+  const showHydrousSites = nearbyFilter !== 'geological';
+  const showGeologicalFeatures = nearbyFilter !== 'hydrous';
+
+  for (const site of showHydrousSites ? nearbyHydrousSites : []) {
     const markerX = ((site.longitude + 180) / 360) * width + view.x;
     const markerY = ((90 - site.latitude) / 180) * height + view.y;
     const isHighlighted = highlightedHydrousSite === site.id;
@@ -429,7 +535,25 @@ function MarsMap() {
         aria-label={`Hydrous site, ${site.distanceKm.toFixed(1)} kilometers away`}
         className={`hydrous-marker${isHighlighted ? ' highlighted' : ''}`}
         key={site.id}
-        onClick={() => centerOnHydrousSite(site)}
+        onClick={() => centerOnReference(site, 'hydrous')}
+        onPointerDown={(event) => event.stopPropagation()}
+        onPointerUp={(event) => event.stopPropagation()}
+        style={{ transform: `translate(${markerX}px, ${markerY}px)` }}
+        type="button"
+      />,
+    );
+  }
+
+  for (const feature of showGeologicalFeatures ? nearbyGeologicalFeatures : []) {
+    const markerX = ((feature.longitude + 180) / 360) * width + view.x;
+    const markerY = ((90 - feature.latitude) / 180) * height + view.y;
+    const isHighlighted = highlightedGeologicalFeature === feature.id;
+    markers.push(
+      <button
+        aria-label={`${feature.name}, ${feature.type}, ${feature.distanceKm.toFixed(1)} kilometers to center`}
+        className={`geological-marker${isHighlighted ? ' highlighted' : ''}`}
+        key={feature.id}
+        onClick={() => centerOnReference(feature, 'geological')}
         onPointerDown={(event) => event.stopPropagation()}
         onPointerUp={(event) => event.stopPropagation()}
         style={{ transform: `translate(${markerX}px, ${markerY}px)` }}
@@ -495,6 +619,13 @@ function MarsMap() {
       </div>
       {selectedLocation && (
         <section className="location-info" onPointerDown={(event) => event.stopPropagation()}>
+          <span
+            aria-hidden="true"
+            className="panel-resize-handle"
+            onPointerDown={startTopPanelResize}
+            onPointerMove={resizeTopPanel}
+            onPointerUp={endTopPanelResize}
+          />
           <header>
             <span>{measurementEnd ? 'Terrain-aware route' : 'Route start selected'}</span>
             <strong>
@@ -524,31 +655,65 @@ function MarsMap() {
               </div>
             </div>
             <div className="nearby-points">
-              <span>Nearby hydrous sites</span>
-              <p className="hydrous-explainer">Hydrous sites have mineral signatures associated with past water activity on Mars.</p>
-              {hydrousSites.status === 'loading' && <p>Loading sites...</p>}
-              {hydrousSites.status === 'error' && <p>{hydrousError || 'Hydrous-site data is unavailable.'}</p>}
-              {hydrousSites.status === 'ready' && nearbyHydrousSites.length === 0 && <p>No nearby hydrous sites were found.</p>}
-              <div className="hydrous-site-list">
-                {nearbyHydrousSites.map((site) => (
+              <span>Nearby Martian Features</span>
+              <div className="nearby-filters" role="group" aria-label="Nearby feature filter">
+                {[['all', 'All'], ['hydrous', 'Hydrous Sites'], ['geological', 'Geological Features']].map(([value, label]) => (
                   <button
-                    className={highlightedHydrousSite === site.id ? 'highlighted' : ''}
-                    key={site.id}
-                    onClick={() => centerOnHydrousSite(site)}
+                    aria-pressed={nearbyFilter === value}
+                    className={nearbyFilter === value ? 'active' : ''}
+                    key={value}
+                    onClick={() => setNearbyFilter(value)}
                     type="button"
                   >
-                    <span className="hydrous-site-distance">{site.distanceKm.toFixed(1)} km</span>
-                    <span className="hydrous-site-coordinates">{coordinateLabel(site.latitude, site.longitude)}</span>
-                    {(site.omegaProductId || site.crismProductId) && (
-                      <span className="hydrous-site-ids">
-                        {site.omegaProductId && `OMEGA ${site.omegaProductId}`}
-                        {site.omegaProductId && site.crismProductId && ' · '}
-                        {site.crismProductId && `CRISM ${site.crismProductId}`}
-                      </span>
-                    )}
+                    {label}
                   </button>
                 ))}
               </div>
+              {showHydrousSites && <>
+                {hydrousSites.status === 'loading' && <p>Loading hydrous sites...</p>}
+                {hydrousSites.status === 'error' && <p>{hydrousError || 'Hydrous-site data is unavailable.'}</p>}
+                {hydrousSites.status === 'ready' && nearbyHydrousSites.length === 0 && <p>No nearby hydrous sites were found.</p>}
+                <div className="hydrous-site-list">
+                  {nearbyHydrousSites.map((site) => (
+                    <button
+                      className={highlightedHydrousSite === site.id ? 'highlighted' : ''}
+                      key={site.id}
+                      onClick={() => centerOnReference(site, 'hydrous')}
+                      type="button"
+                    >
+                      <span className="hydrous-site-distance">{site.distanceKm.toFixed(1)} km</span>
+                      <span className="hydrous-site-coordinates">{coordinateLabel(site.latitude, site.longitude)}</span>
+                      {(site.omegaProductId || site.crismProductId) && (
+                        <span className="hydrous-site-ids">
+                          {site.omegaProductId && `OMEGA ${site.omegaProductId}`}
+                          {site.omegaProductId && site.crismProductId && ' · '}
+                          {site.crismProductId && `CRISM ${site.crismProductId}`}
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </>}
+              {showGeologicalFeatures && <>
+                {geologicalFeatures.status === 'loading' && <p>Loading geological features...</p>}
+                {geologicalFeatures.status === 'error' && <p>{geologicalError || 'Geological features are unavailable from OpenSpace.'}</p>}
+                {geologicalFeatures.status === 'ready' && nearbyGeologicalFeatures.length === 0 && <p>No nearby geological features were found.</p>}
+                <div className="geological-feature-list">
+                  {nearbyGeologicalFeatures.map((feature) => (
+                    <button
+                      className={highlightedGeologicalFeature === feature.id ? 'highlighted' : ''}
+                      key={feature.id}
+                      onClick={() => centerOnReference(feature, 'geological')}
+                      type="button"
+                    >
+                      <span className="geological-feature-distance">{feature.distanceKm.toFixed(1)} km to center</span>
+                      <span className="geological-feature-name">{feature.name}</span>
+                      <span className="geological-feature-type">{feature.type}</span>
+                      <span className="geological-feature-coordinates">{coordinateLabel(feature.latitude, feature.longitude)}</span>
+                    </button>
+                  ))}
+                </div>
+              </>}
             </div>
             <p className="measurement-hint">Select a second map point to calculate a terrain-aware route. Hydrous sites are nearby reference detections.</p>
           </>}
