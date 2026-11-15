@@ -69,7 +69,14 @@ def combine():
             combined_row = elev + find_closest(lat, long, temp_dict)
             insert_statement += f"   ({combined_row[0]}, {combined_row[1]}, {combined_row[2]}, {combined_row[3]}, {combined_row[4]}, {combined_row[5]}, {combined_row[6]}, {combined_row[7]}),\n"
 
-    db.connect_to_db().execute(insert_statement[:-2] + ";")
+    connection = db.connect_to_db()
+    cursor = connection.cursor()
+    try:
+        cursor.execute(insert_statement[:-2] + ";")
+        connection.commit()
+    finally:
+        cursor.close()
+        connection.close()
 
 
     # with open('../data/big-mars-combined.sql', mode='w', newline='') as output:

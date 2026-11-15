@@ -14,14 +14,15 @@ def connect_to_db():
         database=config['db']['database'],
         host=config['db']['host']
     )
-    cursor = db.cursor()
-
-    return cursor
+    return db
 
 
 def query_db(query):
-    cursor = connect_to_db()
-    cursor.execute(query)
-    results = cursor.fetchall()
-    cursor.close()
-    return results
+    db = connect_to_db()
+    cursor = db.cursor()
+    try:
+        cursor.execute(query)
+        return cursor.fetchall()
+    finally:
+        cursor.close()
+        db.close()

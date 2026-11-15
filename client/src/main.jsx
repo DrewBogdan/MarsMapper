@@ -1,85 +1,254 @@
 import { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import hydrousSitesCsv from '../../data/hydrous_sites_geo_map.csv?raw';
 import './styles.css';
 
-const TILE_URL =
-  'https://trek.nasa.gov/tiles/Mars/EQ/Mars_Viking_MDIM21_ClrMosaic_global_232m/1.0.0/default/default028mm/{z}/{y}/{x}.jpg';
-const MIN_ZOOM = 2;
-const MAX_ZOOM = 7;
-const LOCATION_ZOOM = 5;
-const ELEVATION_BOUNDS = {
-  minLatitude: 17.70703125,
-  maxLatitude: 18.95703125,
-  minLongitude: 226.11328125,
-  maxLongitude: 227.48828125,
+const MAP_LAYERS = {
+  color: {
+    label: 'Color imagery',
+    maxNativeZoom: 7,
+    url: 'https://trek.nasa.gov/tiles/Mars/EQ/Mars_Viking_MDIM21_ClrMosaic_global_232m/1.0.0/default/default028mm/{z}/{y}/{x}.jpg',
+  },
+  roughness: {
+    label: 'Surface roughness',
+    maxNativeZoom: 1,
+    url: 'https://trek.nasa.gov/tiles/Mars/EQ/mola_roughness/1.0.0/default/default028mm/{z}/{y}/{x}.png',
+  },
+  thermalInertia: {
+    label: 'Thermal inertia',
+    maxNativeZoom: 1,
+    url: 'https://trek.nasa.gov/tiles/Mars/EQ/TES_Thermal_Inertia/1.0.0/default/default028mm/{z}/{y}/{x}.png',
+  },
+  dustCoverage: {
+    label: 'Dust coverage',
+    maxNativeZoom: 1,
+    url: 'https://trek.nasa.gov/tiles/Mars/EQ/TES_Dust/1.0.0/default/default028mm/{z}/{y}/{x}.png',
+  },
 };
+const MIN_ZOOM = 2;
+const MAX_ZOOM = 9;
+const INSPECTION_ZOOM = 5;
+const MARS_RADIUS_KM = 3390;
+const FOCUS_BOUNDS = {
+  minLatitude: 0,
+  maxLatitude: 40,
+  // This 187E west edge (-173 in NASA's -180 to 180 matrix) leaves room west of -163.
+  minLongitude: 187,
+  maxLongitude: 290,
+};
+
+function normalizeMatrixLongitude(longitude) {
+  return ((longitude + 180) % 360 + 360) % 360 - 180;
+}
+
+function parseHydrousSites(csv) {
+  const rows = csv.trim().split(/\r?\n/).map((line) => line.split(',').map((cell) => cell.trim().replace(/^"|"$/g, '')));
+  if (rows.length === 0) return [];
+
+  const headers = rows[0].map((header) => header.toLowerCase());
+  const hasHeader = !Number.isFinite(Number(headers[0]));
+  const indexFor = (name, fallback) => hasHeader ? headers.findIndex((header) => header.includes(name)) : fallback;
+  const longitudeIndex = indexFor('longitude', 0);
+  const latitudeIndex = indexFor('latitude', 1);
+  const omegaIndex = indexFor('omega', 2);
+  const crismIndex = indexFor('crism', 3);
+  const sourceIndex = indexFor('source', 2);
+  const siteIdIndex = indexFor('site_id', 3);
+
+  return rows.slice(hasHeader ? 1 : 0).flatMap((row, index) => {
+    const longitude = Number(row[longitudeIndex]);
+    const latitude = Number(row[latitudeIndex]);
+    if (!Number.isFinite(longitude) || !Number.isFinite(latitude) || Math.abs(longitude) > 360 || latitude < -90 || latitude > 90) return [];
+
+    const source = row[sourceIndex] ?? '';
+    const siteId = row[siteIdIndex] ?? '';
+    const explicitOmega = omegaIndex >= 0 ? row[omegaIndex] : '';
+    const explicitCrism = crismIndex >= 0 ? row[crismIndex] : '';
+    const unlabelledIds = [source, siteId].filter(Boolean);
+    const fallbackCrism = unlabelledIds.find((id) => /^FRT|^HRL|^HRS|^FRS/i.test(id)) ?? '';
+    const fallbackOmega = unlabelledIds.find((id) => id !== fallbackCrism) ?? '';
+    return [{
+      id: `${index}-${normalizeMatrixLongitude(longitude)}-${latitude}`,
+      latitude,
+      longitude: normalizeMatrixLongitude(longitude),
+      omegaProductId: explicitOmega || fallbackOmega,
+      crismProductId: explicitCrism || fallbackCrism,
+    }];
+  });
+}
+
+function surfaceDistanceKm(first, second) {
+  const latitudeDifference = ((second.latitude - first.latitude) * Math.PI) / 180;
+  const longitudeDifference = (normalizeMatrixLongitude(second.longitude - first.longitude) * Math.PI) / 180;
+  const a = Math.sin(latitudeDifference / 2) ** 2
+    + Math.cos((first.latitude * Math.PI) / 180) * Math.cos((second.latitude * Math.PI) / 180) * Math.sin(longitudeDifference / 2) ** 2;
+  return MARS_RADIUS_KM * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function coordinateLabel(latitude, longitude) {
+  return `${Math.abs(latitude).toFixed(2)}°${latitude < 0 ? 'S' : 'N'}, ${Math.abs(longitude).toFixed(2)}°${longitude < 0 ? 'W' : 'E'}`;
+}
 
 function worldSize(zoom) {
   // NASA EPSG:104905 level 0 is two columns by one row, not a square XYZ world.
   return { width: 512 * 2 ** zoom, height: 256 * 2 ** zoom };
 }
 
-function constrain(view, element) {
-  const { width, height } = worldSize(view.zoom);
+function matrixLongitude(longitude) {
+  return longitude > 180 ? longitude - 360 : longitude;
+}
+
+function focusPixels(zoom) {
+  const { width, height } = worldSize(zoom);
   return {
-    ...view,
-    x: Math.min(0, Math.max(element.clientWidth - width, view.x)),
-    y: Math.min(0, Math.max(element.clientHeight - height, view.y)),
+    left: ((matrixLongitude(FOCUS_BOUNDS.minLongitude) + 180) / 360) * width,
+    right: ((matrixLongitude(FOCUS_BOUNDS.maxLongitude) + 180) / 360) * width,
+    top: ((90 - FOCUS_BOUNDS.maxLatitude) / 180) * height,
+    bottom: ((90 - FOCUS_BOUNDS.minLatitude) / 180) * height,
   };
 }
 
-function parseElevationSamples(csv) {
-  return csv.trim().split('\n').slice(1).map((line) => {
-    const [, latitude, longitude, elevation] = line.split(',');
-    return { latitude: Number(latitude), longitude: Number(longitude), elevation: Number(elevation) };
-  });
+function fittingZoom(element) {
+  const bounds = focusPixels(0);
+  const scale = Math.min(
+    element.clientWidth / (bounds.right - bounds.left),
+    element.clientHeight / (bounds.bottom - bounds.top),
+  );
+  return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Math.floor(Math.log2(scale))));
 }
 
-function findNearestSample(samples, latitude, longitude) {
-  return samples.reduce((nearest, sample) => {
-    const distance = (sample.latitude - latitude) ** 2 + (sample.longitude - longitude) ** 2;
-    return !nearest || distance < nearest.distance ? { sample, distance } : nearest;
-  }, null)?.sample;
+function constrain(view, element, allowGlobal = false) {
+  const bounds = focusPixels(view.zoom);
+  const { width, height } = worldSize(view.zoom);
+  if (allowGlobal) {
+    return {
+      ...view,
+      x: Math.min(0, Math.max(element.clientWidth - width, view.x)),
+      y: Math.min(0, Math.max(element.clientHeight - height, view.y)),
+    };
+  }
+  const focusWidth = bounds.right - bounds.left;
+  const focusHeight = bounds.bottom - bounds.top;
+  const focusX = focusWidth <= element.clientWidth
+    ? (element.clientWidth - focusWidth) / 2 - bounds.left
+    : Math.min(-bounds.left, Math.max(element.clientWidth - bounds.right, view.x));
+  return {
+    ...view,
+    // Do not center a narrow focus area beyond Mars's western tile edge.
+    x: Math.min(0, Math.max(element.clientWidth - width, focusX)),
+    // The focused latitude band can be shorter than a tall viewport; keep its
+    // initial position but let users pan vertically through the imagery.
+    y: focusHeight <= element.clientHeight
+      ? Math.min(0, Math.max(element.clientHeight - height, view.y))
+      : Math.min(-bounds.top, Math.max(element.clientHeight - bounds.bottom, view.y)),
+  };
 }
 
 function MarsMap() {
   const mapRef = useRef(null);
   const dragRef = useRef(null);
+  const hydrousExploreRef = useRef(false);
   const [view, setView] = useState({ zoom: MIN_ZOOM, x: 0, y: 0 });
+  const [minimumZoom, setMinimumZoom] = useState(MIN_ZOOM);
+  const [layer, setLayer] = useState('color');
   const [tileError, setTileError] = useState('');
   const [longitude, setLongitude] = useState('');
   const [latitude, setLatitude] = useState('');
   const [locationError, setLocationError] = useState('');
   const [selectedLocation, setSelectedLocation] = useState(null);
-  const [elevationSamples, setElevationSamples] = useState([]);
+  const [measurementStart, setMeasurementStart] = useState(null);
+  const [measurementEnd, setMeasurementEnd] = useState(null);
+  const [route, setRoute] = useState({ status: 'idle', value: null });
+  const [routeError, setRouteError] = useState('');
+  const [elevation, setElevation] = useState({ status: 'idle', value: null });
+  const [temperature, setTemperature] = useState({ status: 'idle', value: null });
   const [elevationError, setElevationError] = useState('');
+  const [hydrousSites, setHydrousSites] = useState({ status: 'loading', value: [] });
+  const [hydrousError, setHydrousError] = useState('');
+  const [highlightedHydrousSite, setHighlightedHydrousSite] = useState(null);
+  const [hydrousExploreMode, setHydrousExploreMode] = useState(false);
 
   useEffect(() => {
     const element = mapRef.current;
     const centerInitialView = () => {
-      const { width, height } = worldSize(MIN_ZOOM);
-      setView({ zoom: MIN_ZOOM, x: (element.clientWidth - width) / 2, y: (element.clientHeight - height) / 2 });
+      const zoom = fittingZoom(element);
+      const bounds = focusPixels(zoom);
+      setMinimumZoom(zoom);
+      setView(constrain({
+        zoom,
+        x: element.clientWidth / 2 - (bounds.left + bounds.right) / 2,
+        y: element.clientHeight / 2 - (bounds.top + bounds.bottom) / 2,
+      }, element));
     };
 
     centerInitialView();
-    const observer = new ResizeObserver(() => setView((current) => constrain(current, element)));
+    const observer = new ResizeObserver(() => setView((current) => constrain(current, element, hydrousExploreRef.current)));
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
 
   useEffect(() => {
-    fetch('/mars-polygon.csv')
+    try {
+      const sites = parseHydrousSites(hydrousSitesCsv);
+      if (sites.length === 0) throw new Error('No valid hydrous-site records were found.');
+      setHydrousSites({ status: 'ready', value: sites });
+    } catch (error) {
+      setHydrousSites({ status: 'error', value: [] });
+      setHydrousError(error.message);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!selectedLocation) return undefined;
+    const controller = new AbortController();
+    setElevation({ status: 'loading', value: null });
+    setTemperature({ status: 'loading', value: null });
+    setElevationError('');
+
+    fetch(`/api/elevation?longitude=${selectedLocation.lng}&latitude=${selectedLocation.lat}`, { signal: controller.signal })
       .then((response) => {
         if (!response.ok) throw new Error(`Request failed with status ${response.status}`);
-        return response.text();
+        return response.json();
       })
-      .then((csv) => setElevationSamples(parseElevationSamples(csv)))
-      .catch((error) => setElevationError(error.message));
-  }, []);
+      .then((payload) => {
+        setElevation({ status: 'ready', value: payload.elevation });
+        setTemperature({ status: 'ready', value: payload.temperature });
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') setElevationError(error.message);
+      });
+
+    return () => controller.abort();
+  }, [selectedLocation]);
+
+  useEffect(() => {
+    if (!measurementStart || !measurementEnd) return undefined;
+    const controller = new AbortController();
+    setRoute({ status: 'loading', value: null });
+    setRouteError('');
+    const query = new URLSearchParams({
+      fromLongitude: measurementStart.lng,
+      fromLatitude: measurementStart.lat,
+      toLongitude: measurementEnd.lng,
+      toLatitude: measurementEnd.lat,
+    });
+
+    fetch(`/api/route?${query}`, { signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error(`Request failed with status ${response.status}`);
+        return response.json();
+      })
+      .then((payload) => setRoute({ status: 'ready', value: payload }))
+      .catch((error) => {
+        if (error.name !== 'AbortError') setRouteError(error.message);
+      });
+
+    return () => controller.abort();
+  }, [measurementStart, measurementEnd]);
 
   const zoomAtCenter = (nextZoom) => {
     const element = mapRef.current;
-    const zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, nextZoom));
+    const zoom = Math.max(minimumZoom, Math.min(MAX_ZOOM, nextZoom));
     if (zoom === view.zoom) return;
 
     const scale = 2 ** (zoom - view.zoom);
@@ -103,7 +272,35 @@ function MarsMap() {
       ...startView,
       x: startView.x + event.clientX - x,
       y: startView.y + event.clientY - y,
-    }, mapRef.current));
+    }, mapRef.current, hydrousExploreMode));
+  };
+
+  const addMeasurementPoint = (location) => {
+    hydrousExploreRef.current = false;
+    setHydrousExploreMode(false);
+    setHighlightedHydrousSite(null);
+    if (!measurementStart || measurementEnd) {
+      setMeasurementStart(location);
+      setMeasurementEnd(null);
+      setRoute({ status: 'idle', value: null });
+      setRouteError('');
+    } else {
+      setMeasurementEnd(location);
+    }
+    setSelectedLocation(location);
+  };
+
+  const clearMeasurement = () => {
+    setMeasurementStart(null);
+    setMeasurementEnd(null);
+    setRoute({ status: 'idle', value: null });
+    setRouteError('');
+    setSelectedLocation(null);
+    setLongitude('');
+    setLatitude('');
+    setHighlightedHydrousSite(null);
+    hydrousExploreRef.current = false;
+    setHydrousExploreMode(false);
   };
 
   const selectMapLocation = (event) => {
@@ -120,7 +317,7 @@ function MarsMap() {
     setLocationError('');
     setLongitude(lng.toFixed(6));
     setLatitude(lat.toFixed(6));
-    setSelectedLocation({ lng, lat, matrixLongitude });
+    addMeasurementPoint({ lng, lat, matrixLongitude });
   };
 
   const endDrag = (event) => {
@@ -134,64 +331,121 @@ function MarsMap() {
     const lng = Number(longitude);
     const lat = Number(latitude);
     if (!longitude.trim() || !latitude.trim() || !Number.isFinite(lng) || !Number.isFinite(lat) || lng < 0 || lng > 360 || lat < -90 || lat > 90) {
-      setLocationError('Enter areocentric longitude from 0 to 360 and latitude from -90 to 90.');
+      setLocationError('Enter longitude from 0 to 360E and latitude from -90 to 90N.');
       return;
     }
 
     const element = mapRef.current;
-    const { width, height } = worldSize(LOCATION_ZOOM);
+    const zoom = Math.max(minimumZoom, INSPECTION_ZOOM);
+    const { width, height } = worldSize(zoom);
     // NASA's matrix spans -180 to 180 while entered areocentric longitude is 0 to 360 east.
-    const matrixLongitude = lng > 180 ? lng - 360 : lng;
+    const tileLongitude = matrixLongitude(lng);
     // Normalize areocentric degrees into NASA's equirectangular tile matrix.
-    const pointX = ((matrixLongitude + 180) / 360) * width;
+    const pointX = ((tileLongitude + 180) / 360) * width;
     const pointY = ((90 - lat) / 180) * height;
     setLocationError('');
-    setSelectedLocation({ lng, lat, matrixLongitude });
+    addMeasurementPoint({ lng, lat, matrixLongitude: tileLongitude });
     setView(constrain({
-      zoom: LOCATION_ZOOM,
+      zoom,
       x: element.clientWidth / 2 - pointX,
       y: element.clientHeight / 2 - pointY,
     }, element));
   };
 
+  const centerOnHydrousSite = (site) => {
+    const element = mapRef.current;
+    const zoom = view.zoom;
+    const { width, height } = worldSize(zoom);
+    const pointX = ((site.longitude + 180) / 360) * width;
+    const pointY = ((90 - site.latitude) / 180) * height;
+    setHydrousExploreMode(true);
+    hydrousExploreRef.current = true;
+    setHighlightedHydrousSite(site.id);
+    setView(constrain({
+      zoom,
+      x: element.clientWidth / 2 - pointX,
+      y: element.clientHeight / 2 - pointY,
+    }, element, true));
+  };
+
   const { width, height } = worldSize(view.zoom);
-  const firstCol = Math.max(0, Math.floor(-view.x / 256));
-  const lastCol = Math.min(width / 256 - 1, Math.ceil((mapRef.current?.clientWidth - view.x) / 256));
-  const firstRow = Math.max(0, Math.floor(-view.y / 256));
-  const lastRow = Math.min(height / 256 - 1, Math.ceil((mapRef.current?.clientHeight - view.y) / 256));
+  const activeLayer = MAP_LAYERS[layer];
+  const sourceZoom = Math.min(view.zoom, activeLayer.maxNativeZoom);
+  const tileScale = 2 ** (view.zoom - sourceZoom);
+  const renderedTileSize = 256 * tileScale;
+  const firstCol = Math.max(0, Math.floor(-view.x / renderedTileSize));
+  const lastCol = Math.min(2 ** (sourceZoom + 1) - 1, Math.ceil((mapRef.current?.clientWidth - view.x) / renderedTileSize));
+  const firstRow = Math.max(0, Math.floor(-view.y / renderedTileSize));
+  const lastRow = Math.min(2 ** sourceZoom - 1, Math.ceil((mapRef.current?.clientHeight - view.y) / renderedTileSize));
   const tiles = [];
-  let marker;
+  const markers = [];
 
   for (let row = firstRow; row <= lastRow; row += 1) {
     for (let col = firstCol; col <= lastCol; col += 1) {
-      const src = TILE_URL.replace('{z}', view.zoom).replace('{y}', row).replace('{x}', col);
+      const src = activeLayer.url.replace('{z}', sourceZoom).replace('{y}', row).replace('{x}', col);
       tiles.push(
         <img
           alt=""
           className="mars-tile"
-          key={src}
+          key={`${layer}-${src}`}
           onError={() => setTileError(`NASA WMTS tile failed to load: ${src}`)}
           src={src}
-          style={{ transform: `translate(${view.x + col * 256}px, ${view.y + row * 256}px)` }}
+          style={{
+            height: `${renderedTileSize}px`,
+            transform: `translate(${view.x + col * renderedTileSize}px, ${view.y + row * renderedTileSize}px)`,
+            width: `${renderedTileSize}px`,
+          }}
         />,
       );
     }
   }
 
-  if (selectedLocation) {
-    const markerX = ((selectedLocation.matrixLongitude + 180) / 360) * width + view.x;
-    const markerY = ((90 - selectedLocation.lat) / 180) * height + view.y;
-    marker = <span aria-label="Selected location" className="location-marker" style={{ transform: `translate(${markerX}px, ${markerY}px)` }} />;
+  for (const [label, location] of [['A', measurementStart], ['B', measurementEnd]]) {
+    if (!location) continue;
+    const markerX = ((location.matrixLongitude + 180) / 360) * width + view.x;
+    const markerY = ((90 - location.lat) / 180) * height + view.y;
+    markers.push(<span aria-label={`Measurement point ${label}`} className={`location-marker marker-${label.toLowerCase()}`} key={label} style={{ transform: `translate(${markerX}px, ${markerY}px)` }}>{label}</span>);
   }
 
-  const hasElevationCoverage = selectedLocation
-    && selectedLocation.lat >= ELEVATION_BOUNDS.minLatitude
-    && selectedLocation.lat <= ELEVATION_BOUNDS.maxLatitude
-    && selectedLocation.lng >= ELEVATION_BOUNDS.minLongitude
-    && selectedLocation.lng <= ELEVATION_BOUNDS.maxLongitude;
-  const elevationSample = hasElevationCoverage && elevationSamples.length
-    ? findNearestSample(elevationSamples, selectedLocation.lat, selectedLocation.lng)
-    : null;
+  const nearbyHydrousSites = selectedLocation && !measurementEnd && hydrousSites.status === 'ready'
+    ? hydrousSites.value
+      .map((site) => ({
+        ...site,
+        distanceKm: surfaceDistanceKm(
+          { latitude: selectedLocation.lat, longitude: selectedLocation.matrixLongitude },
+          site,
+        ),
+      }))
+      .sort((first, second) => first.distanceKm - second.distanceKm)
+      .slice(0, 5)
+    : [];
+
+  for (const site of nearbyHydrousSites) {
+    const markerX = ((site.longitude + 180) / 360) * width + view.x;
+    const markerY = ((90 - site.latitude) / 180) * height + view.y;
+    const isHighlighted = highlightedHydrousSite === site.id;
+    markers.push(
+      <button
+        aria-label={`Hydrous site, ${site.distanceKm.toFixed(1)} kilometers away`}
+        className={`hydrous-marker${isHighlighted ? ' highlighted' : ''}`}
+        key={site.id}
+        onClick={() => centerOnHydrousSite(site)}
+        onPointerDown={(event) => event.stopPropagation()}
+        onPointerUp={(event) => event.stopPropagation()}
+        style={{ transform: `translate(${markerX}px, ${markerY}px)` }}
+        type="button"
+      />,
+    );
+  }
+
+  const routeLine = route.value?.path.map((point) => {
+    const longitude = matrixLongitude(point.longitudeEast);
+    const x = ((longitude + 180) / 360) * width + view.x;
+    const y = ((90 - point.latitudeAreocentric) / 180) * height + view.y;
+    return `${x},${y}`;
+  }).join(' ');
+  const mapWidth = mapRef.current?.clientWidth ?? 0;
+  const mapHeight = mapRef.current?.clientHeight ?? 0;
 
   return (
     <main
@@ -204,7 +458,12 @@ function MarsMap() {
       tabIndex="0"
     >
       {tiles}
-      {marker}
+      {routeLine && (
+        <svg aria-label="Terrain-aware route" className="route-line" height={mapHeight} width={mapWidth}>
+          <polyline points={routeLine} />
+        </svg>
+      )}
+      {markers}
       <form className="location-form" onPointerDown={(event) => event.stopPropagation()} onSubmit={selectLocation}>
         <label>
           Areocentric longitude
@@ -217,19 +476,103 @@ function MarsMap() {
         <button type="submit">Locate</button>
         {locationError && <p className="location-error" role="alert">{locationError}</p>}
       </form>
+      <div className="layer-toggle" aria-label="Map layer" onPointerDown={(event) => event.stopPropagation()}>
+        {Object.entries(MAP_LAYERS).map(([key, mapLayer]) => (
+          <button
+            aria-pressed={layer === key}
+            className={layer === key ? 'active' : ''}
+            key={key}
+            onClick={() => { setLayer(key); setTileError(''); }}
+            type="button"
+          >
+            {mapLayer.label}
+          </button>
+        ))}
+      </div>
       <div className="zoom-controls" aria-label="Map zoom controls" onPointerDown={(event) => event.stopPropagation()}>
         <button aria-label="Zoom in" disabled={view.zoom === MAX_ZOOM} onClick={() => zoomAtCenter(view.zoom + 1)} type="button">+</button>
-        <button aria-label="Zoom out" disabled={view.zoom === MIN_ZOOM} onClick={() => zoomAtCenter(view.zoom - 1)} type="button">-</button>
+        <button aria-label="Zoom out" disabled={view.zoom === minimumZoom} onClick={() => zoomAtCenter(view.zoom - 1)} type="button">-</button>
       </div>
       {selectedLocation && (
         <section className="location-info" onPointerDown={(event) => event.stopPropagation()}>
-          <strong>
-            Areocentric: {Math.abs(selectedLocation.lat).toFixed(5)}{selectedLocation.lat < 0 ? 'S' : 'N'}, {selectedLocation.lng.toFixed(5)}E
-          </strong>
-          {elevationError && <span>Elevation data failed to load: {elevationError}</span>}
-          {!elevationError && !elevationSamples.length && <span>Loading elevation data...</span>}
-          {!elevationError && elevationSamples.length && !elevationSample && <span>No elevation sample is available at this location.</span>}
-          {elevationSample && <span>MOLA 128ppd elevation: {elevationSample.elevation.toLocaleString()} m</span>}
+          <header>
+            <span>{measurementEnd ? 'Terrain-aware route' : 'Route start selected'}</span>
+            <strong>
+              {measurementEnd
+                ? `${Math.abs(measurementStart.lat).toFixed(4)}N, ${measurementStart.lng.toFixed(4)}E to ${Math.abs(measurementEnd.lat).toFixed(4)}N, ${measurementEnd.lng.toFixed(4)}E`
+                : `${Math.abs(selectedLocation.lat).toFixed(5)}${selectedLocation.lat < 0 ? 'S' : 'N'} / ${selectedLocation.lng.toFixed(5)}E`}
+            </strong>
+          </header>
+          {!measurementEnd && <>
+            <div className="metrics">
+              <div>
+                <span>Elevation</span>
+                {elevationError && <strong>Unavailable</strong>}
+                {!elevationError && elevation.status === 'loading' && <strong>Loading</strong>}
+                {!elevationError && elevation.status === 'ready' && !elevation.value && <strong>No sample</strong>}
+                {elevation.value && <strong>{elevation.value.meters.toLocaleString()} m</strong>}
+              </div>
+              <div>
+                <span>Temperature</span>
+                {elevationError && <strong>Unavailable</strong>}
+                {!elevationError && temperature.status === 'loading' && <strong>Loading</strong>}
+                {!elevationError && temperature.status === 'ready' && !temperature.value && <strong>No sample</strong>}
+                {temperature.value && <>
+                  <strong>{temperature.value.averageC.toFixed(1)} C avg</strong>
+                  <small>Max {temperature.value.maximumC.toFixed(1)} C / Min {temperature.value.minimumC.toFixed(1)} C</small>
+                </>}
+              </div>
+            </div>
+            <div className="nearby-points">
+              <span>Nearby hydrous sites</span>
+              <p className="hydrous-explainer">Hydrous sites have mineral signatures associated with past water activity on Mars.</p>
+              {hydrousSites.status === 'loading' && <p>Loading sites...</p>}
+              {hydrousSites.status === 'error' && <p>{hydrousError || 'Hydrous-site data is unavailable.'}</p>}
+              {hydrousSites.status === 'ready' && nearbyHydrousSites.length === 0 && <p>No nearby hydrous sites were found.</p>}
+              <div className="hydrous-site-list">
+                {nearbyHydrousSites.map((site) => (
+                  <button
+                    className={highlightedHydrousSite === site.id ? 'highlighted' : ''}
+                    key={site.id}
+                    onClick={() => centerOnHydrousSite(site)}
+                    type="button"
+                  >
+                    <span className="hydrous-site-distance">{site.distanceKm.toFixed(1)} km</span>
+                    <span className="hydrous-site-coordinates">{coordinateLabel(site.latitude, site.longitude)}</span>
+                    {(site.omegaProductId || site.crismProductId) && (
+                      <span className="hydrous-site-ids">
+                        {site.omegaProductId && `OMEGA ${site.omegaProductId}`}
+                        {site.omegaProductId && site.crismProductId && ' · '}
+                        {site.crismProductId && `CRISM ${site.crismProductId}`}
+                      </span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <p className="measurement-hint">Select a second map point to calculate a terrain-aware route. Hydrous sites are nearby reference detections.</p>
+          </>}
+          {measurementEnd && <>
+            <div className="metrics measurement-metrics">
+              <div>
+                <span>Route distance</span>
+                {routeError && <strong>Unavailable</strong>}
+                {!routeError && route.status === 'loading' && <strong>Routing</strong>}
+                {route.value && <strong>{route.value.distance.kilometers.toFixed(2)} km</strong>}
+              </div>
+              <div>
+                <span>Elevation gain / loss</span>
+                {route.value && <strong>{route.value.elevation.gainMeters.toLocaleString()} / {route.value.elevation.lossMeters.toLocaleString()} m</strong>}
+                {!route.value && <strong>--</strong>}
+              </div>
+              <div>
+                <span>Net elevation change</span>
+                {route.value && <strong>{route.value.elevation.netChangeMeters.toLocaleString()} m</strong>}
+                {!route.value && <strong>--</strong>}
+              </div>
+            </div>
+          </>}
+          <button className="clear-measurement" onClick={clearMeasurement} type="button">Clear route</button>
         </section>
       )}
       {tileError && <p id="tile-error" role="alert">{tileError}</p>}
