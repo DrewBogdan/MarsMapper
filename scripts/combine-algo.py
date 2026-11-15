@@ -71,7 +71,14 @@ def combine():
     for row in combined:
         insert_statement += f"   ({row[0]}, {row[1]}, {row[2]}, {row[3]}, {row[4]}, {row[5]}, {row[6]}, {row[7]}),\n"
 
-    db.connect_to_db().execute(insert_statement[:-2] + ";")
+    connection = db.connect_to_db()
+    cursor = connection.cursor()
+    try:
+        cursor.execute(insert_statement[:-2] + ";")
+        connection.commit()
+    finally:
+        cursor.close()
+        connection.close()
 
 
     # with open('../data/big-mars-combined.sql', mode='w', newline='') as output:
