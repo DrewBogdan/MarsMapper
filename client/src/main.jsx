@@ -29,6 +29,9 @@ const MIN_ZOOM = 2;
 const MAX_ZOOM = 9;
 const INSPECTION_ZOOM = 5;
 const MARS_RADIUS_KM = 3390;
+const ROUTE_POI_CORRIDOR_KM = 5;
+const DEFAULT_ROVER_SPEED_KPH = 0.1;
+const DEFAULT_DRIVING_HOURS_PER_SOL = 4;
 const GEO_FEATURES_URL = 'https://geocode.openspaceproject.com/1/list/mars';
 const GEO_FEATURES_CACHE_KEY = 'mars-geological-features-v1';
 const FOCUS_BOUNDS = {
@@ -105,6 +108,40 @@ function surfaceDistanceKm(first, second) {
   return MARS_RADIUS_KM * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+function radians(value) {
+  return (value * Math.PI) / 180;
+}
+
+function initialBearing(first, second) {
+  const longitudeDifference = radians(normalizeMatrixLongitude(second.longitude - first.longitude));
+  const firstLatitude = radians(first.latitude);
+  const secondLatitude = radians(second.latitude);
+  return Math.atan2(
+    Math.sin(longitudeDifference) * Math.cos(secondLatitude),
+    Math.cos(firstLatitude) * Math.sin(secondLatitude) - Math.sin(firstLatitude) * Math.cos(secondLatitude) * Math.cos(longitudeDifference),
+  );
+}
+
+function distanceToRouteKm(point, path) {
+  if (path.length === 0) return Infinity;
+  if (path.length === 1) return surfaceDistanceKm(point, path[0]);
+  return path.slice(0, -1).reduce((nearest, start, index) => {
+    const end = path[index + 1];
+    const segmentDistance = surfaceDistanceKm(start, end) / MARS_RADIUS_KM;
+    const startDistance = surfaceDistanceKm(start, point) / MARS_RADIUS_KM;
+    if (segmentDistance === 0) return Math.min(nearest, startDistance * MARS_RADIUS_KM);
+    const crossTrack = Math.asin(Math.sin(startDistance) * Math.sin(initialBearing(start, point) - initialBearing(start, end)));
+    const alongTrack = Math.atan2(
+      Math.sin(startDistance) * Math.cos(initialBearing(start, point) - initialBearing(start, end)),
+      Math.cos(startDistance),
+    );
+    const distance = alongTrack >= 0 && alongTrack <= segmentDistance
+      ? Math.abs(crossTrack) * MARS_RADIUS_KM
+      : Math.min(surfaceDistanceKm(point, start), surfaceDistanceKm(point, end));
+    return Math.min(nearest, distance);
+  }, Infinity);
+}
+
 function coordinateLabel(latitude, longitude) {
   return `${Math.abs(latitude).toFixed(2)}°${latitude < 0 ? 'S' : 'N'}, ${Math.abs(longitude).toFixed(2)}°${longitude < 0 ? 'W' : 'E'}`;
 }
@@ -137,30 +174,12 @@ function fittingZoom(element) {
   return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Math.floor(Math.log2(scale))));
 }
 
-function constrain(view, element, allowGlobal = false) {
-  const bounds = focusPixels(view.zoom);
+function constrain(view, element) {
   const { width, height } = worldSize(view.zoom);
-  if (allowGlobal) {
-    return {
-      ...view,
-      x: Math.min(0, Math.max(element.clientWidth - width, view.x)),
-      y: Math.min(0, Math.max(element.clientHeight - height, view.y)),
-    };
-  }
-  const focusWidth = bounds.right - bounds.left;
-  const focusHeight = bounds.bottom - bounds.top;
-  const focusX = focusWidth <= element.clientWidth
-    ? (element.clientWidth - focusWidth) / 2 - bounds.left
-    : Math.min(-bounds.left, Math.max(element.clientWidth - bounds.right, view.x));
   return {
     ...view,
-    // Do not center a narrow focus area beyond Mars's western tile edge.
-    x: Math.min(0, Math.max(element.clientWidth - width, focusX)),
-    // The focused latitude band can be shorter than a tall viewport; keep its
-    // initial position but let users pan vertically through the imagery.
-    y: focusHeight <= element.clientHeight
-      ? Math.min(0, Math.max(element.clientHeight - height, view.y))
-      : Math.min(-bounds.top, Math.max(element.clientHeight - bounds.bottom, view.y)),
+    x: Math.min(0, Math.max(element.clientWidth - width, view.x)),
+    y: Math.min(0, Math.max(element.clientHeight - height, view.y)),
   };
 }
 
@@ -179,8 +198,11 @@ function MarsMap() {
   const [selectedLocation, setSelectedLocation] = useState(null);
   const [measurementStart, setMeasurementStart] = useState(null);
   const [measurementEnd, setMeasurementEnd] = useState(null);
+  const [routeWaypoint, setRouteWaypoint] = useState(null);
   const [route, setRoute] = useState({ status: 'idle', value: null });
   const [routeError, setRouteError] = useState('');
+  const [roverSpeedKph, setRoverSpeedKph] = useState(String(DEFAULT_ROVER_SPEED_KPH));
+  const [drivingHoursPerSol, setDrivingHoursPerSol] = useState(String(DEFAULT_DRIVING_HOURS_PER_SOL));
   const [elevation, setElevation] = useState({ status: 'idle', value: null });
   const [temperature, setTemperature] = useState({ status: 'idle', value: null });
   const [elevationError, setElevationError] = useState('');
@@ -281,6 +303,13 @@ function MarsMap() {
 
   useEffect(() => {
     if (!measurementStart || !measurementEnd) return undefined;
+    const speed = Number(roverSpeedKph);
+    const dailyHours = Number(drivingHoursPerSol);
+    if (!Number.isFinite(speed) || speed < 0.01 || speed > 0.152 || !Number.isFinite(dailyHours) || dailyHours < 0.5 || dailyHours > 12) {
+      setRoute({ status: 'idle', value: null });
+      setRouteError('Enter rover speed from 0.01 to 0.152 km/h and driving hours from 0.5 to 12 per sol.');
+      return undefined;
+    }
     const controller = new AbortController();
     setRoute({ status: 'loading', value: null });
     setRouteError('');
@@ -289,7 +318,13 @@ function MarsMap() {
       fromLatitude: measurementStart.lat,
       toLongitude: measurementEnd.lng,
       toLatitude: measurementEnd.lat,
+      roverSpeedKph,
+      drivingHoursPerSol,
     });
+    if (routeWaypoint) {
+      query.set('viaLongitude', routeWaypoint.lng);
+      query.set('viaLatitude', routeWaypoint.lat);
+    }
 
     fetch(`/api/route?${query}`, { signal: controller.signal })
       .then((response) => {
@@ -302,7 +337,7 @@ function MarsMap() {
       });
 
     return () => controller.abort();
-  }, [measurementStart, measurementEnd]);
+  }, [measurementStart, measurementEnd, routeWaypoint, roverSpeedKph, drivingHoursPerSol]);
 
   const zoomAtCenter = (nextZoom) => {
     const element = mapRef.current;
@@ -341,6 +376,7 @@ function MarsMap() {
     if (!measurementStart || measurementEnd) {
       setMeasurementStart(location);
       setMeasurementEnd(null);
+      setRouteWaypoint(null);
       setRoute({ status: 'idle', value: null });
       setRouteError('');
     } else {
@@ -352,6 +388,7 @@ function MarsMap() {
   const clearMeasurement = () => {
     setMeasurementStart(null);
     setMeasurementEnd(null);
+    setRouteWaypoint(null);
     setRoute({ status: 'idle', value: null });
     setRouteError('');
     setSelectedLocation(null);
@@ -452,6 +489,13 @@ function MarsMap() {
     hydrousExploreRef.current = true;
     setHighlightedHydrousSite(category === 'hydrous' ? site.id : null);
     setHighlightedGeologicalFeature(category === 'geological' ? site.id : null);
+    if (measurementEnd) {
+      setRouteWaypoint({
+        lat: site.latitude,
+        lng: site.longitude < 0 ? site.longitude + 360 : site.longitude,
+        label: category === 'geological' ? site.name : 'Hydrous site',
+      });
+    }
     setView(constrain({
       zoom,
       x: element.clientWidth / 2 - pointX,
@@ -523,10 +567,47 @@ function MarsMap() {
       .sort((first, second) => first.distanceKm - second.distanceKm)
       .slice(0, 5)
     : [];
+  const routePath = route.value?.path.map((point) => ({
+    latitude: point.latitudeAreocentric,
+    longitude: normalizeMatrixLongitude(point.longitudeEast),
+  })) ?? [];
+  const routePois = measurementEnd && routePath.length > 0
+    ? (() => {
+      const allPois = [
+      ...hydrousSites.value.map((site) => ({ ...site, category: 'Hydrous site', poiType: 'hydrous' })),
+      ...geologicalFeatures.value.map((feature) => ({ ...feature, category: feature.type, poiType: 'geological' })),
+      ].map((poi) => ({
+        ...poi,
+        startDistanceKm: surfaceDistanceKm(poi, { latitude: measurementStart.lat, longitude: measurementStart.matrixLongitude }),
+        endDistanceKm: surfaceDistanceKm(poi, { latitude: measurementEnd.lat, longitude: measurementEnd.matrixLongitude }),
+        routeDistanceKm: distanceToRouteKm(poi, routePath),
+      }));
+      const startNearest = [...allPois].sort((first, second) => first.startDistanceKm - second.startDistanceKm).slice(0, 5)
+        .map((poi) => ({ ...poi, distanceKm: poi.startDistanceKm, proximity: 'Near start' }));
+      const endNearest = [...allPois].sort((first, second) => first.endDistanceKm - second.endDistanceKm).slice(0, 5)
+        .map((poi) => ({ ...poi, distanceKm: poi.endDistanceKm, proximity: 'Near destination' }));
+      const corridorPois = allPois.filter((poi) => poi.routeDistanceKm <= ROUTE_POI_CORRIDOR_KM)
+        .map((poi) => ({ ...poi, distanceKm: poi.routeDistanceKm, proximity: 'Along route' }));
+      const uniquePois = new Map();
+      for (const poi of [...startNearest, ...endNearest, ...corridorPois]) {
+        const key = `${poi.poiType}-${poi.id}`;
+        const existing = uniquePois.get(key);
+        if (!existing || poi.distanceKm < existing.distanceKm) uniquePois.set(key, poi);
+      }
+      return [...uniquePois.values()].sort((first, second) => first.distanceKm - second.distanceKm);
+    })()
+    : [];
+  const displayedHydrousSites = measurementEnd
+    ? routePois.filter((poi) => poi.poiType === 'hydrous')
+    : nearbyHydrousSites;
+  const displayedGeologicalFeatures = measurementEnd
+    ? routePois.filter((poi) => poi.poiType === 'geological')
+    : nearbyGeologicalFeatures;
   const showHydrousSites = nearbyFilter !== 'geological';
   const showGeologicalFeatures = nearbyFilter !== 'hydrous';
+  const filteredRoutePois = routePois.filter((poi) => nearbyFilter === 'all' || poi.poiType === nearbyFilter);
 
-  for (const site of showHydrousSites ? nearbyHydrousSites : []) {
+  for (const site of showHydrousSites ? displayedHydrousSites : []) {
     const markerX = ((site.longitude + 180) / 360) * width + view.x;
     const markerY = ((90 - site.latitude) / 180) * height + view.y;
     const isHighlighted = highlightedHydrousSite === site.id;
@@ -544,7 +625,7 @@ function MarsMap() {
     );
   }
 
-  for (const feature of showGeologicalFeatures ? nearbyGeologicalFeatures : []) {
+  for (const feature of showGeologicalFeatures ? displayedGeologicalFeatures : []) {
     const markerX = ((feature.longitude + 180) / 360) * width + view.x;
     const markerY = ((90 - feature.latitude) / 180) * height + view.y;
     const isHighlighted = highlightedGeologicalFeature === feature.id;
@@ -718,12 +799,33 @@ function MarsMap() {
             <p className="measurement-hint">Select a second map point to calculate a terrain-aware route. Hydrous sites are nearby reference detections.</p>
           </>}
           {measurementEnd && <>
+            <div className="rover-settings">
+              <label>
+                Rover speed (km/h)
+                <input max="0.152" min="0.01" onChange={(event) => setRoverSpeedKph(event.target.value)} step="0.01" type="number" value={roverSpeedKph} />
+              </label>
+              <label>
+                Driving hours / sol
+                <input max="12" min="0.5" onChange={(event) => setDrivingHoursPerSol(event.target.value)} step="0.5" type="number" value={drivingHoursPerSol} />
+              </label>
+            </div>
+            {routeWaypoint && <p className="route-waypoint">Route via <strong>{routeWaypoint.label}</strong> · {coordinateLabel(routeWaypoint.lat, normalizeMatrixLongitude(routeWaypoint.lng))}</p>}
             <div className="metrics measurement-metrics">
               <div>
                 <span>Route distance</span>
                 {routeError && <strong>Unavailable</strong>}
                 {!routeError && route.status === 'loading' && <strong>Routing</strong>}
                 {route.value && <strong>{route.value.distance.kilometers.toFixed(2)} km</strong>}
+              </div>
+              <div>
+                <span>Rover driving time</span>
+                {route.value && <strong>{route.value.roverPlan.drivingHours.toFixed(1)} h</strong>}
+                {!route.value && <strong>--</strong>}
+              </div>
+              <div>
+                <span>Mission duration</span>
+                {route.value && <strong>{route.value.roverPlan.estimatedSols} sols</strong>}
+                {!route.value && <strong>--</strong>}
               </div>
               <div>
                 <span>Elevation gain / loss</span>
@@ -734,6 +836,32 @@ function MarsMap() {
                 <span>Net elevation change</span>
                 {route.value && <strong>{route.value.elevation.netChangeMeters.toLocaleString()} m</strong>}
                 {!route.value && <strong>--</strong>}
+              </div>
+            </div>
+            {routeError && <p className="route-warning">{routeError}</p>}
+            {route.value && <p className="route-note">{route.value.roverPlan.assumption}</p>}
+            {route.value && <p className="route-warning">{route.value.terrainWarning}</p>}
+            <div className="nearby-points route-pois">
+              <span>Scientific POIs Along Route</span>
+              <small>{ROUTE_POI_CORRIDOR_KM} km route corridor, plus the five nearest POIs to each endpoint.</small>
+              <div className="nearby-filters" role="group" aria-label="Route point of interest filter">
+                {[['all', 'All'], ['hydrous', 'Hydrous Sites'], ['geological', 'Geological Features']].map(([value, label]) => (
+                  <button aria-pressed={nearbyFilter === value} className={nearbyFilter === value ? 'active' : ''} key={value} onClick={() => setNearbyFilter(value)} type="button">{label}</button>
+                ))}
+              </div>
+              {route.status === 'loading' && <p>Finding route POIs...</p>}
+              {route.value && filteredRoutePois.length === 0 && <p>No scientific POIs fall within the route corridor.</p>}
+              <div className="route-poi-list">
+                {filteredRoutePois.map((poi) => (
+                  <button className={poi.poiType === 'hydrous' ? 'hydrous' : 'geological'} key={`${poi.poiType}-${poi.id}`} onClick={() => centerOnReference(poi, poi.poiType)} type="button">
+                    <span>{poi.distanceKm.toFixed(1)} km · {poi.proximity}</span>
+                    <strong>{poi.poiType === 'geological' ? poi.name : 'Hydrous site'}</strong>
+                    <small>
+                      {poi.category} · {coordinateLabel(poi.latitude, poi.longitude)}
+                      {poi.poiType === 'hydrous' && poi.crismProductId && ` · CRISM ${poi.crismProductId}`}
+                    </small>
+                  </button>
+                ))}
               </div>
             </div>
           </>}
