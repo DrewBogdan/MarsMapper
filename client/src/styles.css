@@ -509,12 +509,99 @@ body {
 
 .measurement-metrics > div:nth-child(3) {
   border-top: 1px solid rgba(213, 225, 218, 0.16);
-  grid-column: 1 / -1;
+}
+
+.measurement-metrics > div:nth-child(4),
+.measurement-metrics > div:nth-child(5) {
+  border-top: 1px solid rgba(213, 225, 218, 0.16);
 }
 
 .measurement-metrics strong {
   font-size: 14px;
 }
+
+.rover-settings {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(213, 225, 218, 0.16);
+}
+
+.rover-settings label {
+  display: grid;
+  gap: 5px;
+  color: #9bb4a5;
+  font: 600 9px/1 "Avenir Next", sans-serif;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.rover-settings input {
+  height: 28px;
+  border: 1px solid rgba(213, 225, 218, 0.28);
+  border-radius: 3px;
+  padding: 0 6px;
+  background: rgba(5, 10, 9, 0.45);
+  color: #f3eee8;
+  font: 600 12px/1 "Avenir Next", sans-serif;
+}
+
+.route-note,
+.route-warning,
+.route-waypoint {
+  margin: 0;
+  padding: 10px 14px;
+  color: #aebeb5;
+  font: 11px/1.35 "Avenir Next", sans-serif;
+}
+
+.route-waypoint {
+  border-top: 1px solid rgba(213, 225, 218, 0.12);
+  color: #a9e8d2;
+}
+
+.route-waypoint strong {
+  color: #f3eee8;
+}
+
+.route-warning {
+  border-top: 1px solid rgba(213, 225, 218, 0.12);
+  color: #e6c98a;
+}
+
+.route-pois {
+  border-top: 1px solid rgba(213, 225, 218, 0.16);
+}
+
+.route-pois > small {
+  color: #91a39a;
+  font: 11px/1.25 "Avenir Next", sans-serif;
+}
+
+.route-poi-list {
+  display: grid;
+  gap: 5px;
+}
+
+.route-poi-list button {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  padding: 8px;
+  border: 1px solid rgba(213, 225, 218, 0.16);
+  border-radius: 3px;
+  background: rgba(5, 10, 9, 0.28);
+  color: #d4dfd8;
+  text-align: left;
+  cursor: pointer;
+}
+
+.route-poi-list button.hydrous { border-left: 3px solid #f8d36d; }
+.route-poi-list button.geological { border-left: 3px solid #78c9e8; }
+.route-poi-list span { color: #aebeb5; font: 600 10px/1 "Avenir Next", sans-serif; }
+.route-poi-list strong { color: #f3eee8; font: 600 12px/1 "Avenir Next", sans-serif; }
+.route-poi-list small { color: #91a39a; font: 11px/1.2 "Avenir Next", sans-serif; }
 
 .clear-measurement {
   width: calc(100% - 28px);

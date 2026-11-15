@@ -10,6 +10,9 @@ from scripts import db_retrieval
 PORT = 8000
 MARS_RADIUS_KM = 3396.19
 GRID_STEP_DEGREES = 1 / 64
+PERSEVERANCE_MAX_SPEED_KPH = 0.152
+DEFAULT_ROVER_SPEED_KPH = 0.1
+DEFAULT_DRIVING_HOURS_PER_SOL = 4
 NEAREST_SEARCH_DEGREES = 0.05
 ROUTE_MARGIN_DEGREES = 0.1
 SAMPLE_COLUMNS = "latitude, longitude, elevation, avg_temp, max_temp, min_temp"
@@ -85,7 +88,23 @@ def surface_distance_km(first, second):
     return MARS_RADIUS_KM * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
-def route_between(start_coordinates, end_coordinates):
+def read_route_plan(parameters):
+    def read_number(key, default, minimum, maximum):
+        try:
+            value = float(parameters.get(key, [default])[0])
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} must be a valid number") from None
+        if not minimum <= value <= maximum:
+            raise ValueError(f"{key} must be between {minimum} and {maximum}")
+        return value
+
+    return {
+        "base_speed_kph": read_number("roverSpeedKph", DEFAULT_ROVER_SPEED_KPH, 0.01, PERSEVERANCE_MAX_SPEED_KPH),
+        "driving_hours_per_sol": read_number("drivingHoursPerSol", DEFAULT_DRIVING_HOURS_PER_SOL, 0.5, 12),
+    }
+
+
+def route_between(start_coordinates, end_coordinates, rover_plan):
     """Find a route through recorded elevation samples, never interpolated terrain."""
     latitude_margin = max(ROUTE_MARGIN_DEGREES, abs(start_coordinates["latitude"] - end_coordinates["latitude"]) * 0.2)
     longitude_margin = max(ROUTE_MARGIN_DEGREES, abs(start_coordinates["longitude"] - end_coordinates["longitude"]) * 0.2)
@@ -150,9 +169,20 @@ def route_between(start_coordinates, end_coordinates):
         path_keys.append(came_from[path_keys[-1]])
     path = [elevation_grid[key] for key in reversed(path_keys)]
 
-    distance_km = sum(surface_distance_km(first, second) for first, second in zip(path, path[1:]))
+    segments = list(zip(path, path[1:]))
+    distance_km = sum(surface_distance_km(first, second) for first, second in segments)
     elevation_gain = sum(max(0, second["meters"] - first["meters"]) for first, second in zip(path, path[1:]))
     elevation_loss = sum(max(0, first["meters"] - second["meters"]) for first, second in zip(path, path[1:]))
+    terrain_cost_km = sum(
+        surface_distance_km(first, second) * (
+            1 + 12 * abs(second["meters"] - first["meters"]) / (surface_distance_km(first, second) * 1000)
+        )
+        for first, second in segments
+    )
+    terrain_factor = terrain_cost_km / distance_km if distance_km else 1
+    effective_speed_kph = rover_plan["base_speed_kph"] / terrain_factor
+    driving_hours = distance_km / effective_speed_kph if effective_speed_kph else 0
+    estimated_sols = math.ceil(driving_hours / rover_plan["driving_hours_per_sol"])
     return {
         "path": [{"longitudeEast": point["longitude"], "latitudeAreocentric": point["latitude"]} for point in path],
         "start": location_payload({"longitude": start["longitude"], "latitude": start["latitude"]}),
@@ -163,6 +193,43 @@ def route_between(start_coordinates, end_coordinates):
             "gainMeters": elevation_gain,
             "lossMeters": elevation_loss,
         },
+        "roverPlan": {
+            "baseSpeedKph": rover_plan["base_speed_kph"],
+            "effectiveSpeedKph": effective_speed_kph,
+            "drivingHours": driving_hours,
+            "drivingHoursPerSol": rover_plan["driving_hours_per_sol"],
+            "estimatedSols": estimated_sols,
+            "assumption": "Planning estimate only: non-driving time each sol is reserved for operations, rest, and recharge. Perseverance's MMRTG continuously supplies power and is not modeled as a depleting fixed battery.",
+        },
+        "terrainWarning": "Route selection uses the available elevation grid; it is suitable for regional planning, not rover-scale hazard avoidance.",
+    }
+
+
+def route_via_waypoint(start_coordinates, end_coordinates, waypoint_coordinates, rover_plan):
+    first_leg = route_between(start_coordinates, waypoint_coordinates, rover_plan)
+    second_leg = route_between(waypoint_coordinates, end_coordinates, rover_plan)
+    distance_km = first_leg["distance"]["kilometers"] + second_leg["distance"]["kilometers"]
+    driving_hours = first_leg["roverPlan"]["drivingHours"] + second_leg["roverPlan"]["drivingHours"]
+    return {
+        "path": first_leg["path"] + second_leg["path"][1:],
+        "start": first_leg["start"],
+        "end": second_leg["end"],
+        "waypoint": location_payload(waypoint_coordinates),
+        "distance": {"kilometers": distance_km, "miles": distance_km * 0.621371},
+        "elevation": {
+            "netChangeMeters": second_leg["elevation"]["netChangeMeters"] + first_leg["elevation"]["netChangeMeters"],
+            "gainMeters": second_leg["elevation"]["gainMeters"] + first_leg["elevation"]["gainMeters"],
+            "lossMeters": second_leg["elevation"]["lossMeters"] + first_leg["elevation"]["lossMeters"],
+        },
+        "roverPlan": {
+            "baseSpeedKph": rover_plan["base_speed_kph"],
+            "drivingHours": driving_hours,
+            "drivingHoursPerSol": rover_plan["driving_hours_per_sol"],
+            "estimatedSols": math.ceil(driving_hours / rover_plan["driving_hours_per_sol"]),
+            "effectiveSpeedKph": distance_km / driving_hours if driving_hours else rover_plan["base_speed_kph"],
+            "assumption": first_leg["roverPlan"]["assumption"],
+        },
+        "terrainWarning": first_leg["terrainWarning"],
     }
 
 
@@ -215,7 +282,9 @@ class MarsMapperHandler(BaseHTTPRequestHandler):
             start = read_coordinates(parameters, "from")
             end = read_coordinates(parameters, "to")
             if request.path == "/api/route":
-                self.send_json(200, route_between(start, end))
+                rover_plan = read_route_plan(parameters)
+                waypoint = read_coordinates(parameters, "via") if "viaLongitude" in parameters or "viaLatitude" in parameters else None
+                self.send_json(200, route_via_waypoint(start, end, waypoint, rover_plan) if waypoint else route_between(start, end, rover_plan))
                 return
         except ValueError as error:
             self.send_json(400, {"error": str(error)})
