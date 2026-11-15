@@ -9,7 +9,7 @@ from scripts import db_retrieval
 
 PORT = 8000
 MARS_RADIUS_KM = 3396.19
-GRID_STEP_DEGREES = 1 / 128
+GRID_STEP_DEGREES = 1 / 64
 NEAREST_SEARCH_DEGREES = 0.05
 ROUTE_MARGIN_DEGREES = 0.1
 SAMPLE_COLUMNS = "latitude, longitude, elevation, avg_temp, max_temp, min_temp"
