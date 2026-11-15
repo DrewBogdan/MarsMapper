@@ -32,13 +32,13 @@ def search(value, keys):
 
 def combine():
     temperature = []
-    with open('../data/test-temp-large-area.csv', mode='r') as csvfile:
+    with open('../data/large-area-temp.csv', mode='r') as csvfile:
         reader = csv.reader(csvfile)
         for row in reader:
             temperature.append(row)
 
     elevation = []
-    with open('../data/test-large-area.csv', mode='r') as csvfile:
+    with open('../data/large-area-index.csv', mode='r') as csvfile:
         reader = csv.reader(csvfile)
         for row in reader:
             elevation.append(row)
@@ -56,28 +56,37 @@ def combine():
         temp_dict[lat][long] = temp[3:]
 
 
-    insert_statement = "INSERT INTO MarsPoints (id, latitude, longitude, elevation, avg_temp, max_temp, min_temp, temp_variation) VALUES"
-    with open('../data/big-mars-combined.sql', mode='w', newline='') as output:
-        output.write(insert_statement)
-        for elev in elevation:
+    insert_statement = "INSERT INTO MarsPoints (latitude, longitude, elevation, avg_temp, max_temp, min_temp, temp_variation, point) VALUES"
+    current_insert = insert_statement
+    count = 0
+    for elev in elevation:
+        try:
             lat = round(float(elev[1]),4)
             long = round(float(elev[2]),4)
-            if lat in temp_dict and long in temp_dict[lat]:
-                temp_data = temp_dict[lat][long]
-                combined_row = elev + temp_data
-                output.write(f"\n   (0, {combined_row[1]}, {combined_row[2]}, {combined_row[3]}, {combined_row[4]}, {combined_row[5]}, {combined_row[6]}, {combined_row[7]}),")
-            else:
-                combined_row = elev + find_closest(lat, long, temp_dict)
-                output.write(f"\n   (0, {combined_row[1]}, {combined_row[2]}, {combined_row[3]}, {combined_row[4]}, {combined_row[5]}, {combined_row[6]}, {combined_row[7]}),")
+        except IndexError as error:
+            print(elev)
+            print(error)
+            continue
+        if lat in temp_dict and long in temp_dict[lat]:
+            temp_data = temp_dict[lat][long]
+            combined_row = elev + temp_data
+            current_insert += f"\n   ({combined_row[1]}, {combined_row[2]}, {combined_row[3]}, {combined_row[4]}, {combined_row[5]}, {combined_row[6]}, {combined_row[7]}, Point({combined_row[1]}, {combined_row[2]})),"
+        else:
+            combined_row = elev + find_closest(lat, long, temp_dict)
+            current_insert += f"\n   ({combined_row[1]}, {combined_row[2]}, {combined_row[3]}, {combined_row[4]}, {combined_row[5]}, {combined_row[6]}, {combined_row[7]}, Point({combined_row[1]}, {combined_row[2]})),"
 
-    # connection = db.connect_to_db()
-    # cursor = connection.cursor()
-    # try:
-    #     cursor.execute(insert_statement[:-2] + ";")
-    #     connection.commit()
-    # finally:
-    #     cursor.close()
-    #     connection.close()
+        if count == 10000:
+            print("Executing 10000 insert statement")
+            connection = db.connect_to_db()
+            cursor = connection.cursor()
+            try:
+                cursor.execute(current_insert[:-1] + ";")
+                connection.commit()
+            finally:
+                cursor.close()
+                connection.close()
+                count = 0
+                current_insert = insert_statement
 
 
     # with open('../data/big-mars-combined.sql', mode='w', newline='') as output:
