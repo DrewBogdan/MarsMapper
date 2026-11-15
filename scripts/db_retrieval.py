@@ -5,7 +5,7 @@ from pathlib import Path
 # import pandas as pd
 
 def connect_to_db():
-    config_path = Path(__file__).resolve().parent / "config.ini"
+    config_path = Path(__file__).resolve().parent.parent / "config.ini"
     config = ConfigParser()
     config.read(config_path)
 

@@ -43,17 +43,22 @@ def sample_from_row(row):
 
 
 def load_samples(minimum_latitude, maximum_latitude, minimum_longitude, maximum_longitude):
-    # Inputs come from parsed floats, so interpolating them cannot inject SQL.
+    # The database stores location as POINT(latitude, longitude), so use that
+    # order in the MBR polygon to activate its spatial index.
+    polygon = (
+        f"POLYGON(({minimum_latitude:.12f} {minimum_longitude:.12f}, "
+        f"{minimum_latitude:.12f} {maximum_longitude:.12f}, "
+        f"{maximum_latitude:.12f} {maximum_longitude:.12f}, "
+        f"{maximum_latitude:.12f} {minimum_longitude:.12f}, "
+        f"{minimum_latitude:.12f} {minimum_longitude:.12f}))"
+    )
     query = (
         f"SELECT {SAMPLE_COLUMNS} FROM MarsPoints "
-        f"WHERE latitude BETWEEN {minimum_latitude:.12f} AND {maximum_latitude:.12f} "
-        f"AND longitude BETWEEN {minimum_longitude:.12f} AND {maximum_longitude:.12f}"
+        f"WHERE MBRContains(ST_GeomFromText('{polygon}', 0), location)"
     )
     try:
         return [sample_from_row(row) for row in db_retrieval.query_db(query)]
     except Exception as error:
-        print(f"Database error: {exc}", file=sys.stderr, flush=True)
-        traceback.print_exc()
         raise DatabaseUnavailable(f"Mars terrain database is unavailable: {error}") from error
 
 
