@@ -1,6 +1,8 @@
 from configparser import ConfigParser
 import mysql.connector as mysql
-#import pandas as pd
+
+
+# import pandas as pd
 
 def connect_to_db():
     config = ConfigParser()
@@ -14,10 +16,12 @@ def connect_to_db():
     )
     cursor = db.cursor()
 
-    cursor.execute('SHOW TABLES')
-    bases = cursor.fetchall()
-
-    print(bases)
+    return cursor
 
 
-connect_to_db()
+def query_db(query):
+    cursor = connect_to_db()
+    cursor.execute(query)
+    results = cursor.fetchall()
+    cursor.close()
+    return results

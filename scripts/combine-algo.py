@@ -1,15 +1,12 @@
 import csv
-
+import db_retrieval as db
 
 # lat 1 8 digit, lat 2 4 digit
 def find_closest(lat, long, temp_dict):
     key = search(lat, sorted(list(temp_dict.keys())))
-    print(f"Closest latitude: {key}")
     return temp_dict[key][search(long, sorted(list(temp_dict[key].keys())))]
 
 def search(value, keys):
-    print("Search Start")
-    print(keys)
     if len(keys) == 1:
         return keys[0]
     if len(keys) == 2:
@@ -35,13 +32,13 @@ def search(value, keys):
 
 def combine():
     temperature = []
-    with open('../data/mars-temp-polygon.csv', mode='r') as csvfile:
+    with open('../data/big-temp-polygon.csv', mode='r') as csvfile:
         reader = csv.reader(csvfile)
         for row in reader:
             temperature.append(row)
 
     elevation = []
-    with open('../data/mars-polygon.csv', mode='r') as csvfile:
+    with open('../data/big-polygon.csv', mode='r') as csvfile:
         reader = csv.reader(csvfile)
         for row in reader:
             elevation.append(row)
@@ -63,7 +60,6 @@ def combine():
     for elev in elevation:
         lat = round(float(elev[1]),4)
         long = round(float(elev[2]),4)
-        print(f"Checking elevation coordinates: ({lat}, {long})")
         if lat in temp_dict and long in temp_dict[lat]:
             temp_data = temp_dict[lat][long]
             combined_row = elev + temp_data
@@ -71,12 +67,16 @@ def combine():
         else:
             combined.append(elev + find_closest(lat, long, temp_dict))
 
+    insert_statement = "INSERT INTO MarsPoints (ID, latitude, longitude, elevation, average_temperature, maximum_temperature, minimum_temperature, temperature_variation) VALUES\n"
+    for row in combined:
+        insert_statement += f"   ({row[0]}, {row[1]}, {row[2]}, {row[3]}, {row[4]}, {row[5]}, {row[6]}, {row[7]}),\n"
 
-    print(combined)
+    db.connect_to_db().execute(insert_statement[:-2] + ";")
 
-    with open('../data/mars-combined.csv', mode='w', newline='') as csvfile:
-        writer = csv.writer(csvfile)
-        writer.writerow(['ID', 'latitude', 'longitude', 'elevation', 'Average Temperature (C)', 'Maximum Temperature (C)', 'Minimum Temperature (C)', 'Temperature Variation (C)'])
-        for row in combined:
-            writer.writerow(row)
+
+    # with open('../data/big-mars-combined.sql', mode='w', newline='') as output:
+    #     output.write("INSERT INTO MarsPoints (ID, latitude, longitude, elevation, average_temperature, maximum_temperature, minimum_temperature, temperature_variation) VALUES\n")
+    #     for row in combined:
+    #         output.write(f"   ({row[0]}, {row[1]}, {row[2]}, {row[3]}, {row[4]}, {row[5]}, {row[6]}, {row[7]}),\n")
+
 combine()
