@@ -16,6 +16,7 @@ DEFAULT_DRIVING_HOURS_PER_SOL = 4
 NEAREST_SEARCH_DEGREES = 0.05
 ROUTE_MARGIN_DEGREES = 0.1
 SAMPLE_COLUMNS = "latitude, longitude, elevation, avg_temp, max_temp, min_temp"
+coverage_bounds_cache = None
 
 
 class DatabaseUnavailable(Exception):
@@ -79,6 +80,31 @@ def nearest_from_samples(samples, latitude, longitude):
         samples,
         key=lambda item: (item["latitude"] - latitude) ** 2 + (item["longitude"] - longitude) ** 2,
     )
+
+
+def terrain_coverage_bounds():
+    """Return the database-backed extent containing terrain samples."""
+    global coverage_bounds_cache
+    if coverage_bounds_cache is not None:
+        return coverage_bounds_cache
+
+    try:
+        rows = db_retrieval.query_db(
+            "SELECT MIN(latitude), MAX(latitude), MIN(longitude), MAX(longitude) FROM MarsPoints"
+        )
+    except Exception as error:
+        raise DatabaseUnavailable(f"Mars terrain database is unavailable: {error}") from error
+
+    minimum_latitude, maximum_latitude, minimum_longitude, maximum_longitude = rows[0]
+    coverage_bounds_cache = {
+        "bounds": {
+            "minLatitude": float(minimum_latitude),
+            "maxLatitude": float(maximum_latitude),
+            "minLongitude": float(minimum_longitude),
+            "maxLongitude": float(maximum_longitude),
+        }
+    }
+    return coverage_bounds_cache
 
 
 def surface_distance_km(first, second):
@@ -265,12 +291,16 @@ def location_payload(coordinates):
 class MarsMapperHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         request = urlparse(self.path)
-        if request.path not in ("/api/elevation", "/api/route"):
+        if request.path not in ("/api/coverage", "/api/elevation", "/api/route"):
             self.send_error(404, "Not Found")
             return
 
         parameters = parse_qs(request.query)
         try:
+            if request.path == "/api/coverage":
+                self.send_json(200, terrain_coverage_bounds())
+                return
+
             if request.path == "/api/elevation":
                 coordinates = read_coordinates(parameters)
                 location = location_payload(coordinates)

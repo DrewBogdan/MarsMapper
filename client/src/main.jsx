@@ -146,6 +146,14 @@ function coordinateLabel(latitude, longitude) {
   return `${Math.abs(latitude).toFixed(2)}°${latitude < 0 ? 'S' : 'N'}, ${Math.abs(longitude).toFixed(2)}°${longitude < 0 ? 'W' : 'E'}`;
 }
 
+async function readApiResponse(response) {
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(payload?.error || `Request failed with status ${response.status}`);
+  }
+  return payload;
+}
+
 function worldSize(zoom) {
   // NASA EPSG:104905 level 0 is two columns by one row, not a square XYZ world.
   return { width: 512 * 2 ** zoom, height: 256 * 2 ** zoom };
@@ -206,6 +214,7 @@ function MarsMap() {
   const [elevation, setElevation] = useState({ status: 'idle', value: null });
   const [temperature, setTemperature] = useState({ status: 'idle', value: null });
   const [elevationError, setElevationError] = useState('');
+  const [terrainCoverage, setTerrainCoverage] = useState(null);
   const [hydrousSites, setHydrousSites] = useState({ status: 'loading', value: [] });
   const [hydrousError, setHydrousError] = useState('');
   const [highlightedHydrousSite, setHighlightedHydrousSite] = useState(null);
@@ -232,6 +241,15 @@ function MarsMap() {
     const observer = new ResizeObserver(() => setView((current) => constrain(current, element, hydrousExploreRef.current)));
     observer.observe(element);
     return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch('/api/coverage', { signal: controller.signal })
+      .then(readApiResponse)
+      .then((payload) => setTerrainCoverage(payload.bounds ?? null))
+      .catch(() => setTerrainCoverage(null));
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {
@@ -286,10 +304,7 @@ function MarsMap() {
     setElevationError('');
 
     fetch(`/api/elevation?longitude=${selectedLocation.lng}&latitude=${selectedLocation.lat}`, { signal: controller.signal })
-      .then((response) => {
-        if (!response.ok) throw new Error(`Request failed with status ${response.status}`);
-        return response.json();
-      })
+      .then(readApiResponse)
       .then((payload) => {
         setElevation({ status: 'ready', value: payload.elevation });
         setTemperature({ status: 'ready', value: payload.temperature });
@@ -327,10 +342,7 @@ function MarsMap() {
     }
 
     fetch(`/api/route?${query}`, { signal: controller.signal })
-      .then((response) => {
-        if (!response.ok) throw new Error(`Request failed with status ${response.status}`);
-        return response.json();
-      })
+      .then(readApiResponse)
       .then((payload) => setRoute({ status: 'ready', value: payload }))
       .catch((error) => {
         if (error.name !== 'AbortError') setRouteError(error.message);
@@ -649,6 +661,13 @@ function MarsMap() {
     const y = ((90 - point.latitudeAreocentric) / 180) * height + view.y;
     return `${x},${y}`;
   }).join(' ');
+  const coverageRectangle = terrainCoverage && (() => {
+    const left = ((matrixLongitude(terrainCoverage.minLongitude) + 180) / 360) * width + view.x;
+    const right = ((matrixLongitude(terrainCoverage.maxLongitude) + 180) / 360) * width + view.x;
+    const top = ((90 - terrainCoverage.maxLatitude) / 180) * height + view.y;
+    const bottom = ((90 - terrainCoverage.minLatitude) / 180) * height + view.y;
+    return { x: left, y: top, width: right - left, height: bottom - top };
+  })();
   const mapWidth = mapRef.current?.clientWidth ?? 0;
   const mapHeight = mapRef.current?.clientHeight ?? 0;
 
@@ -663,6 +682,14 @@ function MarsMap() {
       tabIndex="0"
     >
       {tiles}
+      {coverageRectangle && (
+        <>
+          <svg aria-label="Terrain data coverage area" className="terrain-coverage" height={mapHeight} width={mapWidth}>
+            <rect {...coverageRectangle} />
+          </svg>
+          <p className="terrain-coverage-legend">Elevation and routing data only available within dashed boundary</p>
+        </>
+      )}
       {routeLine && (
         <svg aria-label="Terrain-aware route" className="route-line" height={mapHeight} width={mapWidth}>
           <polyline points={routeLine} />
