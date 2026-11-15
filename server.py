@@ -9,7 +9,7 @@ from scripts import db_retrieval
 
 PORT = 8000
 MARS_RADIUS_KM = 3396.19
-GRID_STEP_DEGREES = 1 / 128
+GRID_STEP_DEGREES = 1 / 64
 PERSEVERANCE_MAX_SPEED_KPH = 0.152
 DEFAULT_ROVER_SPEED_KPH = 0.1
 DEFAULT_DRIVING_HOURS_PER_SOL = 4
@@ -52,6 +52,8 @@ def load_samples(minimum_latitude, maximum_latitude, minimum_longitude, maximum_
     try:
         return [sample_from_row(row) for row in db_retrieval.query_db(query)]
     except Exception as error:
+        print(f"Database error: {exc}", file=sys.stderr, flush=True)
+        traceback.print_exc()
         raise DatabaseUnavailable(f"Mars terrain database is unavailable: {error}") from error
 
 
