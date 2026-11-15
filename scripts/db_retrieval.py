@@ -1,12 +1,13 @@
 from configparser import ConfigParser
 import mysql.connector as mysql
-
+from pathlib import Path
 
 # import pandas as pd
 
 def connect_to_db():
+    config_path = Path(__file__).resolve().parent / "config.ini"
     config = ConfigParser()
-    config.read('config.ini')
+    config.read(config_path)
 
     db = mysql.connect(
         user=config['db']['user'],
