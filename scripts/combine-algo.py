@@ -55,7 +55,8 @@ def combine():
             temp_dict[lat] = {}
         temp_dict[lat][long] = temp[3:]
 
-    combined = []
+
+    insert_statement = "INSERT INTO MarsPoints (ID, latitude, longitude, elevation, average_temperature, maximum_temperature, minimum_temperature, temperature_variation) VALUES\n"
 
     for elev in elevation:
         lat = round(float(elev[1]),4)
@@ -63,13 +64,10 @@ def combine():
         if lat in temp_dict and long in temp_dict[lat]:
             temp_data = temp_dict[lat][long]
             combined_row = elev + temp_data
-            combined.append(combined_row)
+            insert_statement += f"   ({combined_row[0]}, {combined_row[1]}, {combined_row[2]}, {combined_row[3]}, {combined_row[4]}, {combined_row[5]}, {combined_row[6]}, {combined_row[7]}),\n"
         else:
-            combined.append(elev + find_closest(lat, long, temp_dict))
-
-    insert_statement = "INSERT INTO MarsPoints (ID, latitude, longitude, elevation, average_temperature, maximum_temperature, minimum_temperature, temperature_variation) VALUES\n"
-    for row in combined:
-        insert_statement += f"   ({row[0]}, {row[1]}, {row[2]}, {row[3]}, {row[4]}, {row[5]}, {row[6]}, {row[7]}),\n"
+            combined_row = elev + find_closest(lat, long, temp_dict)
+            insert_statement += f"   ({combined_row[0]}, {combined_row[1]}, {combined_row[2]}, {combined_row[3]}, {combined_row[4]}, {combined_row[5]}, {combined_row[6]}, {combined_row[7]}),\n"
 
     db.connect_to_db().execute(insert_statement[:-2] + ";")
 
