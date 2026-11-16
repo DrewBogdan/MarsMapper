@@ -16,3 +16,6 @@ selected points. Routes are coarse terrain comparisons, not navigation guidance.
 
 The map uses NASA's Viking VIS Global Color Mosaic equirectangular tile matrix
 (`EPSG:104905`, `default028mm`), not a Mars Trek iframe or redirect.
+
+## Deployed Demo
+Visit @ https://nasa.drewbogdan.com/
