@@ -553,6 +553,31 @@ body {
   font-size: 14px;
 }
 
+.route-mode {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 10px 14px 0;
+  gap: 6px;
+}
+
+.route-mode button {
+  height: 28px;
+  border: 1px solid rgba(213, 225, 218, 0.28);
+  border-radius: 3px;
+  background: rgba(5, 10, 9, 0.45);
+  color: #aebeb5;
+  font: 600 10px/1 "Avenir Next", sans-serif;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.route-mode button.active {
+  border-color: #a9e8d2;
+  background: rgba(113, 218, 182, 0.15);
+  color: #d8fff0;
+}
+
 .rover-settings {
   display: grid;
   grid-template-columns: 1fr 1fr;

@@ -146,6 +146,14 @@ function coordinateLabel(latitude, longitude) {
   return `${Math.abs(latitude).toFixed(2)}°${latitude < 0 ? 'S' : 'N'}, ${Math.abs(longitude).toFixed(2)}°${longitude < 0 ? 'W' : 'E'}`;
 }
 
+function humanRouteEstimate(routeValue) {
+  if (!routeValue) return null;
+  const walkingHours = routeValue.distance.kilometers / 4 + routeValue.elevation.gainMeters / 600;
+  const effortScore = routeValue.distance.kilometers + routeValue.elevation.gainMeters / 100;
+  const effort = effortScore <= 5 ? 'Low' : effortScore <= 15 ? 'Moderate' : effortScore <= 30 ? 'High' : 'Extreme';
+  return { walkingHours, effort };
+}
+
 async function readApiResponse(response) {
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
@@ -209,6 +217,7 @@ function MarsMap() {
   const [routeWaypoint, setRouteWaypoint] = useState(null);
   const [route, setRoute] = useState({ status: 'idle', value: null });
   const [routeError, setRouteError] = useState('');
+  const [routeMode, setRouteMode] = useState('rover');
   const [roverSpeedKph, setRoverSpeedKph] = useState(String(DEFAULT_ROVER_SPEED_KPH));
   const [drivingHoursPerSol, setDrivingHoursPerSol] = useState(String(DEFAULT_DRIVING_HOURS_PER_SOL));
   const [elevation, setElevation] = useState({ status: 'idle', value: null });
@@ -618,6 +627,7 @@ function MarsMap() {
   const showHydrousSites = nearbyFilter !== 'geological';
   const showGeologicalFeatures = nearbyFilter !== 'hydrous';
   const filteredRoutePois = routePois.filter((poi) => nearbyFilter === 'all' || poi.poiType === nearbyFilter);
+  const humanEstimate = humanRouteEstimate(route.value);
 
   for (const site of showHydrousSites ? displayedHydrousSites : []) {
     const markerX = ((site.longitude + 180) / 360) * width + view.x;
@@ -826,7 +836,11 @@ function MarsMap() {
             <p className="measurement-hint">Select a second map point to calculate a terrain-aware route. Hydrous sites are nearby reference detections.</p>
           </>}
           {measurementEnd && <>
-            <div className="rover-settings">
+            <div className="route-mode" role="group" aria-label="Route estimate mode">
+              <button aria-pressed={routeMode === 'rover'} className={routeMode === 'rover' ? 'active' : ''} onClick={() => setRouteMode('rover')} type="button">Rover</button>
+              <button aria-pressed={routeMode === 'human'} className={routeMode === 'human' ? 'active' : ''} onClick={() => setRouteMode('human')} type="button">Human</button>
+            </div>
+            {routeMode === 'rover' && <div className="rover-settings">
               <label>
                 Rover speed (km/h)
                 <input max="0.152" min="0.01" onChange={(event) => setRoverSpeedKph(event.target.value)} step="0.01" type="number" value={roverSpeedKph} />
@@ -835,7 +849,7 @@ function MarsMap() {
                 Driving hours / sol
                 <input max="12" min="0.5" onChange={(event) => setDrivingHoursPerSol(event.target.value)} step="0.5" type="number" value={drivingHoursPerSol} />
               </label>
-            </div>
+            </div>}
             {routeWaypoint && <p className="route-waypoint">Route via <strong>{routeWaypoint.label}</strong> · {coordinateLabel(routeWaypoint.lat, normalizeMatrixLongitude(routeWaypoint.lng))}</p>}
             <div className="metrics measurement-metrics">
               <div>
@@ -844,16 +858,29 @@ function MarsMap() {
                 {!routeError && route.status === 'loading' && <strong>Routing</strong>}
                 {route.value && <strong>{route.value.distance.kilometers.toFixed(2)} km</strong>}
               </div>
-              <div>
-                <span>Rover driving time</span>
-                {route.value && <strong>{route.value.roverPlan.drivingHours.toFixed(1)} h</strong>}
-                {!route.value && <strong>--</strong>}
-              </div>
-              <div>
-                <span>Mission duration</span>
-                {route.value && <strong>{route.value.roverPlan.estimatedSols} sols</strong>}
-                {!route.value && <strong>--</strong>}
-              </div>
+              {routeMode === 'rover' ? <>
+                <div>
+                  <span>Rover driving time</span>
+                  {route.value && <strong>{route.value.roverPlan.drivingHours.toFixed(1)} h</strong>}
+                  {!route.value && <strong>--</strong>}
+                </div>
+                <div>
+                  <span>Mission duration</span>
+                  {route.value && <strong>{route.value.roverPlan.estimatedSols} sols</strong>}
+                  {!route.value && <strong>--</strong>}
+                </div>
+              </> : <>
+                <div>
+                  <span>Human walking time</span>
+                  {humanEstimate && <strong>{humanEstimate.walkingHours.toFixed(1)} h</strong>}
+                  {!humanEstimate && <strong>--</strong>}
+                </div>
+                <div>
+                  <span>Terrain effort</span>
+                  {humanEstimate && <strong>{humanEstimate.effort}</strong>}
+                  {!humanEstimate && <strong>--</strong>}
+                </div>
+              </>}
               <div>
                 <span>Elevation gain / loss</span>
                 {route.value && <strong>{route.value.elevation.gainMeters.toLocaleString()} / {route.value.elevation.lossMeters.toLocaleString()} m</strong>}
@@ -866,11 +893,12 @@ function MarsMap() {
               </div>
             </div>
             {routeError && <p className="route-warning">{routeError}</p>}
-            {route.value && <p className="route-note">{route.value.roverPlan.assumption}</p>}
+            {route.value && routeMode === 'rover' && <p className="route-note">{route.value.roverPlan.assumption}</p>}
+            {route.value && routeMode === 'human' && <p className="route-note">Human reference only: 4 km/h walking pace plus one hour per 600 m of ascent. EVA conditions, life support, and surface hazards are not modeled.</p>}
             {route.value && <p className="route-warning">{route.value.terrainWarning}</p>}
             <div className="nearby-points route-pois">
               <span>Scientific POIs Along Route</span>
-              <small>{ROUTE_POI_CORRIDOR_KM} km route corridor, plus the five nearest POIs to each endpoint.</small>
+              <small>{ROUTE_POI_CORRIDOR_KM} km route corridor, plus the five nearest points of interest (POIs) to each endpoint.</small>
               <div className="nearby-filters" role="group" aria-label="Route point of interest filter">
                 {[['all', 'All'], ['hydrous', 'Hydrous Sites'], ['geological', 'Geological Features']].map(([value, label]) => (
                   <button aria-pressed={nearbyFilter === value} className={nearbyFilter === value ? 'active' : ''} key={value} onClick={() => setNearbyFilter(value)} type="button">{label}</button>
